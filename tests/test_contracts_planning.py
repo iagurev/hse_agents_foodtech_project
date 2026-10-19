@@ -213,7 +213,9 @@ def test_fixed_search_schemas_and_plan_output():
         ("get_product_analogs", "sku_id"),
     ]:
         schema = tools[name].function_schema.json_schema
-        assert set(schema["properties"]) == {argument}
+        assert set(schema["properties"]) == (
+            {argument, "constraints"} if name == "search_recipes" else {argument}
+        )
     assert set(PlanDraft.model_json_schema()["properties"]) == {"meals", "explanation"}
 
 

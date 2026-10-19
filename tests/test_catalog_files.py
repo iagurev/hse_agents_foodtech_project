@@ -69,6 +69,19 @@ async def test_checker_rejects_broken_cross_file_sku_reference(catalog, product)
         await check_catalog(catalog)
 
 
+@pytest.mark.parametrize("field", ["nutrition_observations", "price_observations"])
+async def test_checker_rejects_mass_volume_observation_mix(catalog, product, field: str) -> None:
+    evidence = {field: [{"unit": "ml" if product.unit == "g" else "g", "base_amount": 100}]}
+    with sqlite3.connect(catalog.products_path) as db:
+        db.execute("UPDATE product_directory SET evidence=?", (json.dumps(evidence),))
+    with pytest.raises(ValueError, match="Единица наблюдения"):
+        await check_catalog(catalog)
+    evidence[field][0]["unit"] = product.unit
+    with sqlite3.connect(catalog.products_path) as db:
+        db.execute("UPDATE product_directory SET evidence=?", (json.dumps(evidence),))
+    assert (await check_catalog(catalog))["product_observations_checked"] == 1
+
+
 async def test_checker_rejects_published_recipe_differing_from_saved_review(catalog) -> None:
     with sqlite3.connect(catalog.sources_path) as db:
         db.execute("INSERT INTO recipe_sources VALUES(1,'{}')")

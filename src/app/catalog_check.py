@@ -59,6 +59,17 @@ async def check_catalog(catalog: Catalog, documents: bool = True) -> dict:
         for pid in active:
             if pid not in products or products[pid].nutrition is None or products[pid].cost is None:
                 raise ValueError("Активная категория неполная")
+        observations_checked = 0
+        for row in await (await db.execute("SELECT product_id,evidence FROM product_directory")).fetchall():
+            evidence = json.loads(row["evidence"])
+            product = products[row["product_id"]]
+            for field in ["nutrition_observations", "price_observations"]:
+                for observation in evidence.get(field, []):
+                    if observation.get("unit") != product.unit:
+                        raise ValueError(
+                            f"Единица наблюдения {field} не соответствует продукту {product.product_id}"
+                        )
+                    observations_checked += 1
         for query, expected in [
             ("SELECT recipe_id FROM recipe_fts", {r.recipe_id for r in recipes}),
             ("SELECT product_id FROM product_fts", active),
@@ -137,6 +148,7 @@ async def check_catalog(catalog: Catalog, documents: bool = True) -> dict:
         "recipes": len(recipes),
         "products": len(products),
         "active_products": len(active),
+        "product_observations_checked": observations_checked,
         "ingredient_rows_checked": ingredient_rows,
         "source_counts": counts,
         "source_statuses": statuses,

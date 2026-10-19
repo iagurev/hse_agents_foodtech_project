@@ -27,7 +27,9 @@ ACTIVE = {"queued", "guarding", "running"}
 class Runs:
     """Владеет фоновыми задачами одного процесса; браузер только наблюдает за ними."""
 
-    def __init__(self, config: Config, store: WebStore, session: Session, guard: InputGuard) -> None:
+    def __init__(
+        self, config: Config, store: WebStore, session: Session | None, guard: InputGuard | None
+    ) -> None:
         self.config, self.store, self.session, self.guard = config, store, session, guard
         self.tasks: dict[str, asyncio.Task] = {}
         self.locks: dict[str, asyncio.Lock] = {}
@@ -35,6 +37,11 @@ class Runs:
 
     async def start(self, user_id: str, chat_id: str, turn_id: str, text: str) -> dict[str, JsonValue]:
         await self.store.chat(user_id, chat_id)
+        if self.session is None or self.guard is None:
+            raise HTTPException(
+                503,
+                "Чат и генерация меню требуют OPENROUTER_API_KEY в .env. Поиск во вкладке «Рецепты» доступен без ключа.",
+            )
         if not text.strip():
             raise HTTPException(422, "Введите сообщение")
         async with self.locks.setdefault(chat_id, asyncio.Lock()):

@@ -101,7 +101,9 @@ def cart_total(
 class Shopper:
     """Агрегация продуктов, кэш кандидатов, пакетный выбор и сохранение корзины."""
 
-    def __init__(self, store: Store, catalog: Catalog, products: Products, generator: Generator) -> None:
+    def __init__(
+        self, store: Store, catalog: Catalog, products: Products, generator: Generator | None
+    ) -> None:
         self.store, self.catalog, self.products, self.generator = store, catalog, products, generator
         self.semaphore = asyncio.Semaphore(4)
 

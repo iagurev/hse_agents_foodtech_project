@@ -1,4 +1,5 @@
 import math
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue, ValidationError
 from pydantic_ai.exceptions import UnexpectedModelBehavior
@@ -16,7 +17,11 @@ from app.models import (
     Result,
     budget_ceiling,
 )
+from app.retrieval.models import SearchConstraints
 from app.storage import Store
+
+if TYPE_CHECKING:
+    from app.retrieval.service import RecipeRetriever
 
 
 def evaluate(
@@ -127,8 +132,16 @@ def evaluate(
 class Planner:
     """Создание меню из каталога и независимое редактирование полной версии."""
 
-    def __init__(self, store: Store, catalog: Catalog, generator: Generator) -> None:
+    def __init__(
+        self,
+        store: Store,
+        catalog: Catalog,
+        generator: Generator,
+        retriever: "RecipeRetriever | None" = None,
+        candidate_strategy: Literal["retrieval", "full_catalog"] = "retrieval",
+    ) -> None:
         self.store, self.catalog, self.generator = store, catalog, generator
+        self.retriever, self.candidate_strategy = retriever, candidate_strategy
 
     async def run(
         self,
@@ -139,6 +152,8 @@ class Planner:
         limits: PlanLimits,
         context: PersonContext,
         usage: RunUsage,
+        *,
+        constraints: SearchConstraints | None = None,
     ) -> Result:
         """Создаёт новую адресуемую версию, сохраняя предыдущую.
 
@@ -154,7 +169,22 @@ class Planner:
         previous = await self.store.replay(user_id, operation_id)
         if previous:
             return previous
-        recipes = await self.catalog.all()
+        diagnostics = []
+        if self.retriever is not None and self.candidate_strategy == "retrieval":
+            selected = await self.retriever.select(
+                request, context, constraints, for_plan=True, days=days, limits=limits
+            )
+            diagnostics = [d.model_dump() for d in selected.diagnostics]
+            index = await self.catalog.recipes_by_ids(selected.recipe_ids)
+            recipes = [index[rid] for rid in selected.recipe_ids if rid in index]
+            if not recipes:
+                return Result.failed(
+                    "NO_SUITABLE_RECIPES",
+                    "Не найдены подтверждённые рецепты по условиям. "
+                    + " ".join(d["message"] for d in diagnostics),
+                )
+        else:
+            recipes = await self.catalog.all()
         if not recipes:
             return Result.failed("EMPTY_CATALOG", "Подготовленный каталог пуст; требуется импорт рецептов")
         products = await self.catalog.products()
@@ -165,6 +195,8 @@ class Planner:
             "limits": limits.model_dump(mode="json"),
             "context": context.model_dump(mode="json"),
             "catalog": [r.planning_card(products) for r in recipes],
+            "retrieval_diagnostics": diagnostics,
+            "retrieval_constraints": constraints.model_dump(mode="json") if constraints else None,
         }
         index = {r.recipe_id: r for r in recipes}
         for attempt in range(2):

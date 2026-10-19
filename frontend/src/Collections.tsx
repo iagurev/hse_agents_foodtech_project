@@ -10,7 +10,7 @@ import {
   ShoppingBag,
 } from 'lucide-react';
 import { api, difficulties, errorText, go, money } from './api';
-import type { Cart, Plan, Recipe, Result } from './api';
+import type { Cart, Plan, Recipe, RecipeSearchData, RecipeSummary, Result } from './api';
 import { Empty, ErrorNote, FoodImage, Loading } from './ui';
 
 export function Collections({
@@ -26,6 +26,37 @@ export function Collections({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  const [found, setFound] = useState<RecipeSummary[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<string[]>([]);
+  useEffect(() => {
+    if (kind !== 'recipes' || !search.trim()) {
+      setSearching(false);
+      setFound([]);
+      setDiagnostics([]);
+      return;
+    }
+    let alive = true;
+    setSearching(true);
+    setError('');
+    setFound([]);
+    setDiagnostics([]);
+    const timer = setTimeout(() => {
+      api<Result<RecipeSearchData>>('/recipes/search', 'POST', { query: search })
+        .then((result) => {
+          if (alive) {
+            setFound(result.data.recipes);
+            setDiagnostics(result.data.diagnostics.map((d) => d.message));
+          }
+        })
+        .catch((e) => alive && setError(errorText(e)))
+        .finally(() => alive && setSearching(false));
+    }, 350);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [search, kind]);
   useEffect(() => {
     let alive = true;
     let previousActive = false;
@@ -67,9 +98,7 @@ export function Collections({
     };
   }, [kind]);
   const title = kind === 'plans' ? 'Ваши планы' : kind === 'recipes' ? 'Рецепты' : 'Покупки';
-  const filtered = recipes.filter((r) =>
-    r.title.toLocaleLowerCase('ru').includes(search.toLocaleLowerCase('ru')),
-  );
+  const filtered = search.trim() ? found : recipes;
   return (
     <div className="page-content collection-page">
       <div className="section-intro">
@@ -78,7 +107,7 @@ export function Collections({
           {kind === 'plans'
             ? 'Продуманное меню, день за днём.'
             : kind === 'recipes'
-              ? 'Всё, что готовите по вашим планам.'
+              ? 'Ваши подборки и поиск по всей базе рецептов.'
               : 'Всё нужное — в одном списке.'}
         </p>
       </div>
@@ -147,18 +176,25 @@ export function Collections({
             ))}
           {kind === 'recipes' && (
             <>
-              {recipes.length > 0 && (
+              {
                 <label className="search-field">
                   <Search size={18} />
                   <input
-                    aria-label="Поиск среди рецептов планов"
-                    placeholder="Найти рецепт"
+                    aria-label="Поиск рецептов по всей базе"
+                    placeholder="Блюдо, продукты или пожелания"
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                   />
                 </label>
-              )}
-              {filtered.length ? (
+              }
+              {diagnostics.map((text, i) => (
+                <p key={i} className="muted" role="status">
+                  {text}
+                </p>
+              ))}
+              {searching ? (
+                <Loading />
+              ) : filtered.length ? (
                 <div className="recipe-list">
                   {filtered.map((r) => (
                     <button
@@ -182,11 +218,11 @@ export function Collections({
               ) : (
                 <Empty
                   icon={<BookOpen />}
-                  title={search ? 'Такого рецепта здесь нет' : 'Ваши рецепты появятся здесь'}
+                  title={search ? 'Подходящие рецепты не найдены' : 'Найдите что-нибудь вкусное'}
                 >
                   {search
-                    ? 'Попробуйте другое название. Поиск по всей базе доступен в чате.'
-                    : 'Составьте план — его рецепты сохранятся в этой подборке.'}
+                    ? 'Уточните блюдо или пожелания. Условия поиска также могут ограничивать выдачу.'
+                    : 'Введите блюдо или продукты в поиске. Рецепты ваших планов также сохранятся здесь.'}
                 </Empty>
               )}
             </>

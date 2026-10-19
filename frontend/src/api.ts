@@ -81,6 +81,14 @@ export interface Recipe {
   nutrition: { kcal: number; protein_g: number; fat_g: number; carbs_g: number };
   cost: { mean_rub: number; min_rub: number; max_rub: number };
 }
+export type RecipeSummary = Pick<
+  Recipe,
+  'recipe_id' | 'title' | 'image_url' | 'total_minutes' | 'difficulty' | 'cost'
+>;
+export interface RecipeSearchData {
+  recipes: RecipeSummary[];
+  diagnostics: { code: string; message: string }[];
+}
 export interface Totals {
   kcal: number;
   protein_g: number;

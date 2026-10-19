@@ -15,11 +15,15 @@ from pydantic_ai.providers.openrouter import OpenRouterProvider
 from app.assistant.agent import build_agent, build_model
 from app.assistant.session import Session
 from app.assistant.tokens import GLMTokenCounter
+from app.assistant.tools import RecipeQuery, RecipeSearchResult
 from app.catalog import Catalog
 from app.config import Config, get_config
 from app.integrations import Vkusvill
 from app.llm import ModelGateway
 from app.models import Result
+from app.network import system_tls_context
+from app.retrieval.service import create_retriever
+from app.shopping import Shopper
 from app.web.contracts import (
     CartEdit,
     ChatUpdate,
@@ -68,49 +72,74 @@ def create_app(
         await catalog.validate()
         await store.initialize()
         async with (
-            httpx.AsyncClient() as client,
-            httpx.AsyncClient(timeout=config.integration_timeout_seconds) as product_client,
+            httpx.AsyncClient(verify=system_tls_context()) as client,
+            httpx.AsyncClient(
+                timeout=config.integration_timeout_seconds, verify=system_tls_context()
+            ) as product_client,
         ):
             active_session, active_guard = session, guard
-            if active_session is None:
-                model = build_model(config, client)
-                counter = await GLMTokenCounter.load(model, config.tokenizer_cache_path, client)
-                active_session = Session(
-                    config,
-                    build_agent(model),
-                    store,
-                    catalog,
-                    Vkusvill(
-                        product_client,
-                        config.vkusvill_mcp_url,
-                        config.integration_timeout_seconds,
-                    ),
-                    ModelGateway(
-                        model,
-                        config.request_limit,
-                        planning_model=build_model(config, client, planning=True),
-                        planning_effort=config.planning_reasoning_effort,
-                    ),
-                    counter,
+            retriever = getattr(active_session, "retriever", None)
+            try:
+                if active_session is None:
+                    retriever = await create_retriever(catalog, config)
+                    if config.openrouter_api_key and config.openrouter_api_key.get_secret_value():
+                        model = build_model(config, client)
+                        counter = await GLMTokenCounter.load(model, config.tokenizer_cache_path, client)
+                        active_session = Session(
+                            config,
+                            build_agent(model),
+                            store,
+                            catalog,
+                            Vkusvill(
+                                product_client, config.vkusvill_mcp_url, config.integration_timeout_seconds
+                            ),
+                            ModelGateway(
+                                model,
+                                config.request_limit,
+                                planning_model=build_model(config, client, planning=True),
+                                planning_effort=config.planning_reasoning_effort,
+                            ),
+                            counter,
+                            retriever,
+                        )
+                if (
+                    active_guard is None
+                    and config.openrouter_api_key
+                    and config.openrouter_api_key.get_secret_value()
+                ):
+                    guard_client = AsyncOpenAI(
+                        api_key=config.openrouter_api_key.get_secret_value(),
+                        base_url=config.openrouter_base_url,
+                        http_client=client,
+                        max_retries=0,
+                        timeout=config.guard_timeout_seconds,
+                    )
+                    guard_model = OpenRouterModel(
+                        config.guard_model,
+                        provider=OpenRouterProvider(openai_client=guard_client),
+                        settings={"openrouter_usage": {"include": True}},
+                    )
+                    active_guard = InputGuard(guard_model)
+                app.state.runs = Runs(config, store, active_session, active_guard)
+                shopper = (
+                    active_session.shopper
+                    if active_session
+                    else Shopper(
+                        store,
+                        catalog,
+                        Vkusvill(product_client, config.vkusvill_mcp_url, config.integration_timeout_seconds),
+                        None,
+                    )
                 )
-            if active_guard is None:
-                guard_client = AsyncOpenAI(
-                    api_key=config.openrouter_api_key.get_secret_value(),
-                    base_url=config.openrouter_base_url,
-                    http_client=client,
-                    max_retries=0,
-                    timeout=config.guard_timeout_seconds,
-                )
-                guard_model = OpenRouterModel(
-                    config.guard_model,
-                    provider=OpenRouterProvider(openai_client=guard_client),
-                    settings={"openrouter_usage": {"include": True}},
-                )
-                active_guard = InputGuard(guard_model)
-            app.state.runs = Runs(config, store, active_session, active_guard)
-            app.state.editor = ObjectEditor(store, catalog, active_session.shopper)
-            yield
-            await app.state.runs.close()
+                app.state.editor = ObjectEditor(store, catalog, shopper)
+                app.state.retriever = retriever
+                app.state.chat_enabled = active_session is not None and active_guard is not None
+                yield
+            finally:
+                if hasattr(app.state, "runs"):
+                    await app.state.runs.close()
+                if session is None and retriever:
+                    retriever.close()
 
     app = FastAPI(title="Ассистент питания", lifespan=lifespan)
 
@@ -154,7 +183,16 @@ def create_app(
 
     @app.get("/api/health")
     async def health() -> dict:
-        return {"status": "ok"}
+        retriever = getattr(app.state, "retriever", None)
+        return {
+            "status": "ok",
+            "chat_enabled": app.state.chat_enabled,
+            "retrieval": {
+                "enabled": retriever is not None,
+                "dense": retriever is not None and retriever.matrix is not None,
+                "index_id": retriever.index_id if retriever else None,
+            },
+        }
 
     @app.post("/api/auth/register")
     async def register(body: Registration, response: Response, request: Request) -> dict:
@@ -272,6 +310,14 @@ def create_app(
         saved = await store.latest(uid, "plan")
         ids = list(dict.fromkeys(m["recipe_id"] for p in saved for m in p["data"]["meals"]))
         return [view for recipe_id in ids if (view := await recipe_view(catalog, recipe_id)) is not None]
+
+    @app.post("/api/recipes/search")
+    async def search_recipes(body: RecipeQuery, uid: str = Depends(user)) -> RecipeSearchResult:
+        if app.state.retriever:
+            result = await app.state.retriever.search(body.query, await store.person(uid), body.constraints)
+        else:
+            result = await catalog.search(body.query)
+        return RecipeSearchResult.from_result(result)
 
     @app.get("/api/recipes/{recipe_id}")
     async def recipe(recipe_id: str, uid: str = Depends(user)) -> dict:

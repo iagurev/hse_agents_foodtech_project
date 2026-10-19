@@ -12,6 +12,7 @@ from app.storage import Store
 
 if TYPE_CHECKING:
     from app.assistant.compaction import Compaction
+    from app.retrieval.service import RecipeRetriever
 
 
 @dataclass
@@ -29,6 +30,7 @@ class Context:
     products: Products
     chat_summary: str = ""
     compaction: "Compaction | None" = None
+    retriever: "RecipeRetriever | None" = None
 
     def instructions(self, summary: str) -> str:
         """Формирует единый актуальный системный контекст.

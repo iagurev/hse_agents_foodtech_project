@@ -20,6 +20,9 @@ dependencies = [
   "uvicorn>=0.34,<1",
   "argon2-cffi>=23,<26",
   "mcp==1.30.0",
+  "fastembed>=0.7,<0.8",
+  "pymorphy3>=2,<3",
+  "truststore>=0.10,<0.11",
 ]
 
 [dependency-groups]
@@ -28,6 +31,10 @@ dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.12,<1"]
 [project.scripts]
 meal-app = "app.web.server:main"
 nutrition-assistant = "app.assistant.__main__:main"
+meal-rag = "app.retrieval.__main__:main"
+
+[[tool.uv.index]]
+url = "https://artifactory.raiffeisen.ru/artifactory/api/pypi/remote-pypi/simple"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/app"]

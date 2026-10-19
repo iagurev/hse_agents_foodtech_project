@@ -13,9 +13,7 @@ from app.assistant.tools import build_toolset
 from app.config import Config
 
 
-def build_model(
-    config: Config, http_client: httpx.AsyncClient, *, planning: bool = False
-) -> OpenRouterModel:
+def build_model(config: Config, http_client: httpx.AsyncClient, *, planning: bool = False) -> OpenRouterModel:
     """Создаёт модель с отключёнными транспортными повторами.
 
     :param config: Проверенные настройки

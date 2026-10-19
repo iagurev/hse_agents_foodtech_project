@@ -32,6 +32,9 @@ class Catalog:
         ]:
             if not path.is_file():
                 raise ValueError(f"Финальная БД {kind} не найдена: {path}")
+            with path.open("rb") as source:
+                if source.read(16) != b"SQLite format 3\x00":
+                    raise ValueError(f"Файл {path} не является SQLite. Для Git LFS выполните git lfs pull.")
             async with aiosqlite.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
                 metadata = dict(await (await db.execute("SELECT key,value FROM metadata")).fetchall())
                 if metadata.get("kind") != kind or metadata.get("schema_version") != "1":
@@ -179,7 +182,7 @@ class Catalog:
         :param recipe_ids: Идентификаторы из каталога
         :return: Полные записи; неизвестные ID пропускаются
         """
-        index = {r.recipe_id: r for r in await self.all()}
+        index = await self.recipes_by_ids(recipe_ids)
         products = await self.products()
         recipes = []
         for recipe_id in dict.fromkeys(recipe_ids):

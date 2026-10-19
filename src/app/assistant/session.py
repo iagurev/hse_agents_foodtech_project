@@ -31,6 +31,7 @@ from app.config import Config
 from app.integrations import Products
 from app.llm import Generator
 from app.planning import Planner
+from app.retrieval.service import RecipeRetriever
 from app.shopping import Shopper
 from app.storage import Store
 
@@ -49,11 +50,13 @@ class Session:
         products: Products,
         generator: Generator,
         counter: RequestCounter,
+        retriever: RecipeRetriever | None = None,
     ) -> None:
         self.config, self.agent, self.store, self.catalog = config, agent, store, catalog
         self.products, self.generator, self.counter = products, generator, counter
+        self.retriever = retriever
         self.planner, self.shopper = (
-            Planner(store, catalog, generator),
+            Planner(store, catalog, generator, retriever, config.planning_candidate_strategy),
             Shopper(store, catalog, products, generator),
         )
         self.locks: dict[str, asyncio.Lock] = {}
@@ -137,6 +140,7 @@ class Session:
                 self.products,
                 summary,
                 compaction,
+                self.retriever,
             )
             usage = usage if usage is not None else RunUsage()
             started = time.monotonic()

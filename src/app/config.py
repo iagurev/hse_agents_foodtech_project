@@ -21,6 +21,14 @@ class Config(BaseSettings):
     recipes_database_path: Path = Path("data/recipes.sqlite")
     products_database_path: Path = Path("data/products.sqlite")
     sources_database_path: Path = Path("data/sources.sqlite")
+    retrieval_enabled: bool = True
+    retrieval_dense_enabled: bool = True
+    retrieval_cache_path: Path = Path("../hse_agents_runtime/retrieval")
+    retrieval_model_cache_path: Path = Path("../hse_agents_runtime/retrieval-model")
+    retrieval_timeout_seconds: float = Field(default=2.8, gt=0, le=30)
+    retrieval_threads: int = Field(default=2, ge=1, le=16)
+    planning_candidate_strategy: Literal["retrieval", "full_catalog"] = "retrieval"
+    planning_candidate_count: int = Field(default=120, ge=20, le=500)
     vkusvill_mcp_url: str = "https://mcp.vkusvill.ru/mcp"
     request_limit: int = Field(default=12, ge=1)
     turn_timeout_seconds: float = Field(default=600, gt=0)

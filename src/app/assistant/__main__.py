@@ -14,6 +14,8 @@ from app.catalog import Catalog
 from app.config import get_config
 from app.integrations import Vkusvill
 from app.llm import ModelGateway
+from app.network import system_tls_context
+from app.retrieval.service import create_retriever
 from app.storage import Store
 
 
@@ -37,10 +39,13 @@ async def execute(args: argparse.Namespace) -> None:
             args.user, json.loads(Path(args.questionnaire).read_text(encoding="utf-8"))
         )
     async with (
-        httpx.AsyncClient() as client,
-        httpx.AsyncClient(timeout=config.integration_timeout_seconds) as product_client,
+        httpx.AsyncClient(verify=system_tls_context()) as client,
+        httpx.AsyncClient(
+            timeout=config.integration_timeout_seconds, verify=system_tls_context()
+        ) as product_client,
     ):
         model = build_model(config, client)
+        retriever = await create_retriever(catalog, config)
         counter = await GLMTokenCounter.load(model, config.tokenizer_cache_path, client)
         session = Session(
             config,
@@ -55,24 +60,30 @@ async def execute(args: argparse.Namespace) -> None:
                 planning_effort=config.planning_reasoning_effort,
             ),
             counter,
+            retriever,
         )
-        if args.message:
-            print(
-                json.dumps(
-                    await session.run(args.user, args.chat, args.message, args.turn_id), ensure_ascii=False
+        try:
+            if args.message:
+                print(
+                    json.dumps(
+                        await session.run(args.user, args.chat, args.message, args.turn_id),
+                        ensure_ascii=False,
+                    )
                 )
-            )
-            return
-        while True:
-            try:
-                text = await asyncio.to_thread(input, "Вы: ")
-            except (EOFError, KeyboardInterrupt):
-                break
-            if text.strip() in {"/exit", "/quit"}:
-                break
-            if text.strip():
-                result = await session.run(args.user, args.chat, text)
-                print(result["text"])
+                return
+            while True:
+                try:
+                    text = await asyncio.to_thread(input, "Вы: ")
+                except (EOFError, KeyboardInterrupt):
+                    break
+                if text.strip() in {"/exit", "/quit"}:
+                    break
+                if text.strip():
+                    result = await session.run(args.user, args.chat, text)
+                    print(result["text"])
+        finally:
+            if retriever:
+                retriever.close()
 
 
 def main() -> None:

@@ -23,6 +23,7 @@ from app.models import (
     StoredCartSource,
     UnresolvedProduct,
 )
+from app.retrieval.models import SearchConstraints, SearchDiagnostic
 
 # Общие основы контрактов. Description — метаданные, не аргумент инструмента.
 
@@ -134,7 +135,7 @@ async def get_plan(ctx: RunContext[Context], args: PlanId) -> PlanResult:
 
 class GeneratePlanInput(ToolInput):
     description: ClassVar[str] = """
-        Создаёт и сохраняет меню по полному подготовленному каталогу. Не требует предварительного
+        Создаёт и сохраняет меню по широкому пулу подходящих рецептов. Не требует предварительного
         search_recipes и не подбирает SKU. Передай условия диалога в request, пределы явно в limits.
         Корзина не создаётся. Включает максимум одну коррекцию, в том числе при ошибке формата.
 
@@ -154,7 +155,8 @@ class GeneratePlanInput(ToolInput):
         Не продолжай составлять тот же план через поиск рецептов и не перезапускай генерацию автоматически.
         Если пользователь запретил менять условия, не предлагай их ослабить.
         Статус error содержит причину в error.message:
-        EMPTY_CATALOG — база пуста, MODEL_FORMAT — ответ не удалось разобрать после коррекции.
+        EMPTY_CATALOG — база пуста, NO_SUITABLE_RECIPES — нет подтверждённого пула по условиям,
+        MODEL_FORMAT — ответ не удалось разобрать после коррекции.
     """
 
     request: str = Field(description="Задача, пожелания и существенные временные условия текущего диалога")
@@ -163,6 +165,10 @@ class GeneratePlanInput(ToolInput):
 
     limits: PlanLimits = Field(
         description="Явные пределы по анкете и диалогу; null в поле снимает предел. Бюджет без прибавки 5%"
+    )
+    constraints: SearchConstraints | None = Field(
+        default=None,
+        description="Действующие условия поиска рецептов по анкете и диалогу; явно передай исключения и недоступную технику, при снятии запрета передай пустой соответствующий список",
     )
 
 
@@ -184,6 +190,7 @@ async def generate_plan(ctx: RunContext[Context], args: GeneratePlanInput) -> Ge
             args.limits,
             d.person,
             ctx.usage,
+            constraints=args.constraints,
         )
     )
 
@@ -274,6 +281,10 @@ class RecipeDetails(RecipeCard):
 
 class RecipeSearchData(Record):
     recipes: list[RecipeCard] = Field(description="До 10 найденных карточек; пусто, если совпадений нет")
+    diagnostics: list[SearchDiagnostic] = Field(
+        default_factory=list,
+        description="Неизвестные условия, недостаток доказательств, деградация или отсутствие совпадений; передай существенные замечания пользователю",
+    )
 
 
 class RecipeDetailsData(Record):
@@ -287,15 +298,26 @@ class RecipeQuery(ToolInput):
     description: ClassVar[str] = """
         Ищет короткие карточки по одному конкретному блюду, названию или сочетанию продуктов
         в подготовленной базе приложения.
-        Поиск по словам; смысловые ограничения оцени по карточкам
-        и контексту пользователя. Возвращает до 10 карточек; размер выдачи фиксирован.
+        Гибридный поиск по смыслу и словам с актуальными анкетой/памятью.
+        Передай действующие исключения продуктов, недоступную технику и прочие поддерживаемые
+        условия через constraints. При явном снятии запрета передай пустой соответствующий список.
+        Свободные условия дополнительно оцени по карточкам; отсутствие аллергена не гарантируется.
+        diagnostics содержит существенные ограничения и деградацию. До 10 карточек, размер фиксирован.
         Не создаёт меню, не загружает рецепты из интернета.
-        Пустой список означает, что по запросу в базе ничего не нашлось; достаточно кратко сообщить об этом.
-        Причину отсутствия записей результат не устанавливает. Близкие варианты предлагай
+        Пустой список означает отсутствие подтверждённых кандидатов по текущим условиям.
+        diagnostics поясняет ограничения данных и поиска. Близкие варианты предлагай
         по возвращённым карточкам, обозначив существенное отличие от запроса.
     """
 
-    query: str = Field(description="Один конкретный запрос: блюдо, название или сочетание ингредиентов")
+    query: str = Field(
+        min_length=1,
+        max_length=4000,
+        description="Один конкретный запрос: блюдо, название или сочетание ингредиентов",
+    )
+    constraints: SearchConstraints | None = Field(
+        default=None,
+        description="Действующие поддерживаемые условия с учётом временных исключений; null использует актуальные анкету/память и текст query",
+    )
 
 
 class RecipeSearchResult(ToolResult[RecipeSearchData]):
@@ -305,6 +327,11 @@ class RecipeSearchResult(ToolResult[RecipeSearchData]):
 
 
 async def search_recipes(ctx: RunContext[Context], args: RecipeQuery) -> RecipeSearchResult:
+    if ctx.deps.retriever is not None:
+        person = await ctx.deps.store.person(ctx.deps.user_id)
+        return RecipeSearchResult.from_result(
+            await ctx.deps.retriever.search(args.query, person, args.constraints)
+        )
     return RecipeSearchResult.from_result(await ctx.deps.catalog.search(args.query))
 
 
