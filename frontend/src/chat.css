@@ -1,0 +1,298 @@
+/* Диалог */
+.chat-main {
+  overflow: hidden;
+}
+.chat-layout {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+.chat-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 10px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.chat-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.chat-picker span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-feed {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  overscroll-behavior: contain;
+  padding: 22px;
+  scrollbar-width: thin;
+  scrollbar-color: #c5d5be transparent;
+}
+.chat-welcome {
+  padding: 16px 0 18px;
+}
+.welcome-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--green);
+  margin-bottom: 22px;
+}
+.chat-welcome h1 {
+  font-size: 40px;
+  line-height: 1.16;
+  letter-spacing: -0.04em;
+}
+.chat-welcome > p {
+  margin-top: 17px;
+  font-size: 14px;
+  color: var(--muted);
+  line-height: 1.8;
+}
+.suggestions {
+  display: flex;
+  flex-direction: column;
+  margin-top: 28px;
+}
+.suggestions button {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-bottom: 1px solid var(--line);
+  min-height: 64px;
+  padding: 13px 0;
+  text-align: left;
+  color: var(--green);
+}
+.suggestions button span {
+  flex: 1;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+.turn {
+  margin-bottom: 26px;
+}
+.user-message {
+  padding: 13px 16px;
+  border-radius: 16px 16px 4px 16px;
+  background: #e8f0df;
+  max-width: 90%;
+  width: fit-content;
+  margin-left: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.65;
+}
+.assistant-message {
+  margin-top: 22px;
+  font-size: 14px;
+  line-height: 1.8;
+}
+.assistant-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 9px;
+}
+.markdown p {
+  margin: 0 0 12px;
+}
+.markdown > *:last-child {
+  margin-bottom: 0;
+}
+.markdown ul,
+.markdown ol {
+  padding-left: 22px;
+}
+.markdown li {
+  margin-bottom: 8px;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  font-size: 17px;
+  margin: 18px 0 10px;
+}
+.markdown pre {
+  max-width: 100%;
+  overflow: auto;
+  background: #eef1e9;
+  padding: 12px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+.markdown a {
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+}
+.working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 16px;
+}
+.composer-area {
+  padding: 10px 16px 12px;
+  background: var(--paper);
+  flex-shrink: 0;
+}
+.composer-area .error-note {
+  margin: 0 0 10px;
+}
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid #d8e1d1;
+  border-radius: 18px;
+  padding: 7px;
+}
+.composer textarea {
+  border: 0;
+  resize: none;
+  max-height: 130px;
+  min-height: 40px;
+  padding: 8px 5px 8px 9px;
+  background: none;
+  font-size: 14px;
+  line-height: 1.6;
+  field-sizing: content;
+  outline: 0;
+}
+.composer:focus-within {
+  border-color: var(--green);
+}
+.send {
+  height: 40px;
+  width: 40px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--green);
+  color: white;
+}
+.send:disabled {
+  background: #dce5d4;
+  color: #65825e;
+  opacity: 1;
+}
+.send.stop {
+  background: #e9eee3;
+  color: var(--green-dark);
+}
+.new-messages {
+  position: absolute;
+  bottom: 86px;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 18px;
+  background: var(--green-dark);
+  color: #fff;
+  font-size: 12px;
+  box-shadow: 0 4px 14px #183b2720;
+}
+.artifact-card {
+  display: flex;
+  width: 100%;
+  gap: 12px;
+  align-items: center;
+  text-align: left;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+  margin-top: 14px;
+}
+.artifact-card > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+.artifact-card strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.artifact-card small {
+  display: block;
+  font-size: 11px;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+.artifact-card .food-photo,
+.artifact-card .food-placeholder {
+  width: 54px;
+  height: 58px;
+  border-radius: 9px;
+}
+.artifact-icon {
+  color: var(--green);
+  width: 42px;
+  display: grid;
+  place-items: center;
+}
+.chat-list {
+  margin-top: 16px;
+}
+.chat-list-row {
+  display: flex;
+  gap: 1px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  padding: 7px 0;
+}
+.chat-list-row > button:first-child {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+  min-height: 50px;
+  font-size: 13px;
+}
+.chat-list-row span {
+  overflow-wrap: anywhere;
+}
+.chat-list-row small {
+  display: block;
+}
+
+.markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 14px 0;
+}
+.markdown th,
+.markdown td {
+  min-width: 100px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}

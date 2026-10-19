@@ -1,0 +1,25 @@
+{
+  "mode": "offline_http_mock",
+  "pydantic_ai_slim_version": "1.68.0",
+  "model_slug_is_only_a_configuration_value": true,
+  "real_model_requests": 0,
+  "synthetic_http_requests": 3,
+  "checks_passed": [
+    "native_loop_executes_tool_and_requests_continuation",
+    "zero_argument_tool_schema",
+    "tool_call_result_id_pairing",
+    "reasoning_details_preserved_within_tool_cycle",
+    "system_role_for_instructions",
+    "history_json_round_trip",
+    "next_turn_uses_restored_history"
+  ],
+  "finding": "Old reasoning is replayed on the next user turn by default; chat-specific filtering requires explicit application policy.",
+  "not_tested": [
+    "GLM output quality",
+    "live OpenRouter/provider compatibility",
+    "streaming",
+    "cancellation",
+    "compaction",
+    "real domain tools"
+  ]
+}
