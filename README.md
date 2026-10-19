@@ -8,7 +8,7 @@
 
 | План питания | Покупки |
 | :---: | :---: |
-| <img src="docs/images/meal-plan.png" alt="План питания: дни, блюда, порции и КБЖУ" width="280"> | <img src="docs/images/shopping-list.png" alt="Список покупок: товары, отметки купленного и недостающие позиции" width="280"> |
+| <img src="docs/images/meal-plan.jpg" alt="План питания: дни, блюда, порции и КБЖУ" width="280"> | <img src="docs/images/shopping-list.jpg" alt="Список покупок: товары, отметки купленного и недостающие позиции" width="280"> |
 
 ## Запуск
 
