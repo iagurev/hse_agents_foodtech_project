@@ -31,14 +31,14 @@ Touching multiple files alone does not require a full spec. Pure git operations,
 1. Read Memory, relevant rules, and relevant source documents. Inspect the implementation before asking about discoverable facts.
 2. If a material requirement is unclear, explain the choice and ask a focused question with meaningful alternatives. Continue independent work while awaiting an answer.
 3. Stop questioning when the consequential decisions are settled. Do not require an external planning skill or an interview for a clear request.
-4. For spec-sized work, use [the spec template](../specs/_template.md). Define the goal, boundaries, requirements, affected contracts, acceptance scenarios, and remaining risks. Omit irrelevant sections.
+4. For spec-sized work, define the goal, boundaries, requirements, affected contracts, acceptance scenarios, and remaining risks. Omit irrelevant sections.
 5. Use stable requirement IDs and a verification matrix for durable behavior according to [executable specs](executable-specs.md). Tests are a normal verification type.
 
 A spec starts as `Proposed` if material decisions remain unapproved. If the user request or approved plan already settles them, record that authority and mark it `Approved`. Never claim approval for a new assumption that materially changes the requested outcome.
 
 ## Plan And Implement
 
-For work requiring a separate execution plan, use [the plan template](../plans/_template.md) in `docs/plans/active/`. Link the source decisions, order the tasks by dependency, and identify acceptance checks and relevant risks. Plans describe implementation without silently adding requirements.
+For work requiring a separate execution plan, place it in `docs/plans/active/`. Link the source decisions, order the tasks by dependency, and identify acceptance checks and relevant risks. Plans describe implementation without silently adding requirements.
 
 Implement in focused steps. Add or update meaningful tests for changed application logic and fixes. Run the applicable existing checks and planned verification, then record actual outcomes. Update verification matrix rows when evidence becomes available. Do not mark a planned command as executed.
 
