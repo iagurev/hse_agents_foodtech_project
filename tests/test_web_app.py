@@ -802,3 +802,34 @@ async def test_reference_access_and_invalid_values_before_execution(web, recipe)
             )
         ).status_code == status
     assert web.harness.calls == 0 and not web.guard.calls
+
+
+async def test_sse_delivers_terminal_snapshot_when_turn_finishes_during_card_projection(web, monkeypatch):
+    release = asyncio.Event()
+    web.harness.wait = release
+    cid = await chat(web)
+    runs = web.app.state.runs
+    await runs.start(web.uid, cid, "projection-race", "Hello")
+    async with asyncio.timeout(2):
+        while not web.harness.calls:
+            await asyncio.sleep(0)
+
+    async def finish_during_projection(store, catalog, user_id, cards):
+        if asyncio.current_task() is not runs.tasks[cid]:
+            release.set()
+            await runs.tasks[cid]
+        return cards
+
+    monkeypatch.setattr("app.web.runs.project_cards", finish_during_projection)
+    stream = runs.events(cid, "projection-race")
+    try:
+        first = json.loads((await anext(stream)).removeprefix("data: "))
+        assert first["state"] == "running" and runs.live[cid]["state"] == "complete"
+        final = json.loads((await asyncio.wait_for(anext(stream), 2)).removeprefix("data: "))
+        assert final["state"] == "complete"
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+    finally:
+        release.set()
+        await runs.tasks[cid]
+        await stream.aclose()

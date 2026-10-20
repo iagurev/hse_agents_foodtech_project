@@ -7,6 +7,59 @@ from pydantic_ai.usage import RunUsage
 
 from app.models import Cost, Ingredient, Meal, Nutrition, PersonContext, PlanDraft, PlanLimits, Recipe
 from app.planning.service import Planner
+from app.planning.transport import RepeatedPlan, RepeatedRevision, planning_input
+
+
+def test_repeated_meals_expand_nonconsecutive_days_before_calculations():
+    value = RepeatedPlan.model_validate(
+        {
+            "meals": [
+                {"days": [1, 3], "meal": "Завтрак", "recipe_id": "r1", "servings": 1.5},
+                {"days": [2], "meal": "Завтрак", "recipe_id": "r2", "servings": 2},
+                {"days": [1, 2, 3], "meal": "Ужин", "recipe_id": "r3", "servings": 3},
+            ],
+            "explanation": "Повторы для удобства",
+        }
+    ).expand()
+    assert [(m.day, m.meal, m.recipe_id, m.servings) for m in value.meals] == [
+        (1, "Завтрак", "r1", 1.5),
+        (1, "Ужин", "r3", 3),
+        (2, "Завтрак", "r2", 2),
+        (2, "Ужин", "r3", 3),
+        (3, "Завтрак", "r1", 1.5),
+        (3, "Ужин", "r3", 3),
+    ]
+    assert value.explanation == "Повторы для удобства"
+
+
+def test_transport_preserves_every_field_and_uses_stable_catalog_prefix(recipe, product):
+    cards = [
+        recipe.planning_card({product.product_id: product}),
+        recipe.model_copy(update={"recipe_id": "r2", "title": 'Каша | "вариант"'}).planning_card(
+            {product.product_id: product}
+        ),
+        recipe.model_copy(update={"recipe_id": "r3", "difficulty": "advanced"}).planning_card(
+            {product.product_id: product}
+        ),
+    ]
+    payload = {"request": "Меню без рыбы", "days": 7, "catalog": cards}
+    before = deepcopy(payload)
+    packed = planning_input(payload)
+    table = packed["catalog"]
+    restored = []
+    for difficulty, rows in table["by_difficulty"].items():
+        for row in rows:
+            card = dict(zip(table["columns"], row, strict=True)) | {"difficulty": difficulty}
+            for field, keys in table["nested_columns"].items():
+                card[field] = dict(zip(keys, card[field], strict=True))
+            restored.append(card)
+    assert restored == cards
+    assert len(table["by_difficulty"]["easy"]) == 2
+    assert len(table["by_difficulty"]["advanced"]) == 1
+    assert payload == before
+    assert list(packed)[0] == "catalog"
+    assert packed["request"] == payload["request"]
+    assert planning_input(payload | {"request": "Другая анкета"})["catalog"] == table
 
 
 def test_round_recipe_numbers_without_rounding_ingredients_or_source_products(recipe, product):
@@ -160,3 +213,21 @@ async def test_unknown_short_id_is_not_guessed(store, catalog):
     assert result.issues[0].code == "RECIPE_NOT_FOUND"
     assert result.issues[0].actual == "r999"
     assert result.data["totals"]["kcal"] == 0
+
+
+def test_compact_revision_preserves_different_portions_and_limits():
+    result = RepeatedRevision.model_validate(
+        {
+            "days": 10,
+            "limits": {"budget_rub": 5000, "max_difficulty": "intermediate"},
+            "explanation": "Изменена порция одного дня",
+            "meals": [
+                {"days": [1, 3, 10], "recipe_id": "one", "meal": "Завтрак", "servings": 1},
+                {"days": [2], "recipe_id": "one", "meal": "Завтрак", "servings": 2.5},
+            ],
+        }
+    ).expand()
+    assert result.days == 10 and result.limits.budget_rub == 5000
+    assert result.limits.max_difficulty == "intermediate"
+    assert [(m.day, m.servings) for m in result.meals] == [(1, 1), (2, 2.5), (3, 1), (10, 1)]
+    assert result.explanation == "Изменена порция одного дня"

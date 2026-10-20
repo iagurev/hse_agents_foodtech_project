@@ -23,7 +23,6 @@ from app.models import (
     Product,
     RecipesSource,
     Result,
-    Selection,
     SkuAmount,
     SkuCartRevision,
     SkusSource,
@@ -32,6 +31,7 @@ from app.models import (
 )
 from app.progress import Progress
 from app.shopping.calculations import aggregate, assemble, cart_total, purchase_quote, valid_sale_quantity
+from app.shopping.selection import select_products
 from app.storage import Store
 from app.tracing import stage
 
@@ -180,9 +180,8 @@ class Shopper:
         if any(candidates.values()):
             await progress.report("cart_select")
             recipes = await self.catalog.recipes_by_ids(sorted({r for p in products for r in p.recipe_ids}))
-            selection = await self.generator.generate(
-                "product_selection",
-                Selection,
+            choices = await select_products(
+                self.generator,
                 {
                     "products": [p.model_dump(mode="json") for p in products],
                     "catalog": [
@@ -193,16 +192,29 @@ class Shopper:
                     ],
                     "candidates": {
                         product.product_id: [
-                            sku.model_dump(mode="json")
-                            | {
-                                "purchase": purchase_quote(
+                            sku.model_dump(
+                                mode="json",
+                                include={
+                                    "sku_id",
+                                    "title",
+                                    "price_rub",
+                                    "sale_unit",
+                                    "package_amount",
+                                    "package_unit",
+                                    "composition",
+                                },
+                            )
+                            | {"purchase": quote}
+                            for sku in candidates[product.product_id]
+                            if (
+                                quote := purchase_quote(
                                     product.amount,
                                     catalog[product.product_id].unit,
                                     sku,
                                     catalog[product.product_id].conversions.get(sku.package_unit),
                                 )
-                            }
-                            for sku in candidates[product.product_id]
+                            )
+                            is not None
                         ]
                         for product in products
                     },
@@ -215,7 +227,6 @@ class Shopper:
                 },
                 usage,
             )
-            choices = {c.product_id: c for c in selection.choices}
         chosen = {}
         for product in products:
             choice = choices.get(product.product_id)
@@ -377,8 +388,21 @@ class Shopper:
             )
         )
         mentioned = await self.store.mentioned_skus(request)
+        snapshots = {
+            row["product_id"]: Product.model_validate(row["product"])
+            for row in current.data["items"]
+            if row.get("product_id") and row.get("product")
+        }
+        # Старые версии хранили выбранный SKU только в items, а products — с null.
+        current_data = dict(current.data)
+        current_data["products"] = [
+            row | {"requested_sku_id": snapshots[row["product_id"]].sku_id}
+            if row["product_id"] in snapshots
+            else row
+            for row in current.data["products"]
+        ]
         payload = {
-            "current_cart": current.data,
+            "current_cart": current_data,
             "request": request,
             "products": [p.model_dump(mode="json") for p in relevant.values()],
             "selected_skus": [p.model_dump(mode="json") for p in mentioned.values()],
@@ -425,13 +449,13 @@ class Shopper:
                 cached = await self.store.get_skus(
                     [p.requested_sku_id for p in products if p.requested_sku_id]
                 )
-                snapshots = {
-                    row["product_id"]: Product.model_validate(row["product"]) for row in current.data["items"]
-                }
                 chosen, problems = {}, {}
+                explicitly_unresolved = {p.product_id for p in candidate.unresolved}
                 for product in products:
                     old = snapshots.get(product.product_id)
                     sku_id = product.requested_sku_id
+                    if old and not sku_id and product.product_id not in explicitly_unresolved:
+                        sku_id = product.requested_sku_id = old.sku_id
                     # Неизменённый товар сохраняет прежний снимок, даже если общий кэш уже обновился.
                     chosen[product.product_id] = old if old and old.sku_id == sku_id else cached.get(sku_id)
                     if sku_id and chosen[product.product_id] is None:

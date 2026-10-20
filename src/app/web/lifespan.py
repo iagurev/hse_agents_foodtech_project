@@ -88,7 +88,12 @@ async def lifespan(
                     provider=OpenRouterProvider(openai_client=guard_client),
                     settings={"openrouter_usage": {"include": True}},
                 )
-                active_guard = InputGuard(guard_model, tracing.instrumentation)
+                fallback_model = (
+                    build_model(config.model_copy(update={"model": config.guard_fallback_model}), client)
+                    if config.guard_fallback_model
+                    else None
+                )
+                active_guard = InputGuard(guard_model, tracing.instrumentation, fallback_model=fallback_model)
             app.state.runs = Runs(config, store, active_session, active_guard, catalog, tracing)
             app.state.media_client = media_client
             shopper = (

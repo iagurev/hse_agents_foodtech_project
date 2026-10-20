@@ -109,6 +109,24 @@ async def test_explicit_filters_and_search_contract(retrieval, engine):
     assert not (await search("сырники", limits(forbidden_equipment=["неизвестная техника"]))).data["recipes"]
 
 
+@pytest.mark.parametrize("engine", ["rag", "fts"])
+@pytest.mark.parametrize(
+    "excluded",
+    [
+        ["творог", "свежий творог"],
+        ["свежий творог", "творог"],
+        ["творог", "растительный творог"],
+        ["яйцо", "перепелиное яйцо"],
+        ["творог", "соус без творога"],
+    ],
+)
+async def test_known_exclusion_does_not_hide_an_unknown_constraint(retrieval, engine, excluded):
+    retriever, _ = retrieval
+    search = retriever.search if engine == "rag" else retriever.catalog.search
+    result = await search("сырники", limits(exclude_products=excluded))
+    assert not result.data["recipes"]
+
+
 async def test_query_is_not_parsed_or_rewritten(retrieval, monkeypatch):
     retriever, _ = retrieval
     seen = []

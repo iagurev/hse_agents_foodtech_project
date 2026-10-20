@@ -197,3 +197,59 @@ async def test_link_transmits_fractional_weight_without_integer_rounding():
     async with httpx.AsyncClient(transport=httpx.MockTransport(server.handle)) as client:
         await Vkusvill(client, "https://mcp.vkusvill.ru/mcp").cart_link({"1066": 0.25, "185": 2})
     assert server.calls[-1]["arguments"]["products"] == [{"id": 1066, "q": 0.25}, {"id": 185, "q": 2}]
+
+
+@pytest.mark.parametrize("failure", ["read", 429, 503])
+@pytest.mark.parametrize("operation", ["search", "link"])
+async def test_transient_failure_repeats_same_operation_once(failure, operation):
+    server = MCPServer(
+        {"ok": True, "data": {"items": [], "link": "https://vkusvill.ru/mobile?basket&share=123"}}
+    )
+    attempts = []
+
+    async def handle(request):
+        if request.method == "POST" and (body := json.loads(request.content))["method"] == "tools/call":
+            attempts.append(body["params"])
+            if len(attempts) == 1:
+                if failure == "read":
+                    raise httpx.ReadError("connection reset", request=request)
+                return httpx.Response(failure)
+        return await server.handle(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        vv = Vkusvill(client, "https://mcp.vkusvill.ru/mcp")
+        result = await vv.search("яблоки") if operation == "search" else await vv.cart_link({"185": 2})
+    assert result == ([] if operation == "search" else server.data["data"]["link"])
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+
+
+async def test_repeated_network_failure_is_bounded():
+    attempts = []
+
+    async def handle(request):
+        attempts.append(request.method)
+        raise httpx.ConnectError("unavailable", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(IntegrationError):
+            await Vkusvill(client, "https://mcp.vkusvill.ru/mcp").cart_link({"185": 1})
+    assert attempts.count("POST") == 2
+
+
+async def test_retry_shares_original_timeout_budget():
+    server = MCPServer({"ok": True, "data": {"items": []}})
+    attempts = 0
+
+    async def handle(request):
+        nonlocal attempts
+        if request.method == "POST" and json.loads(request.content)["method"] == "tools/call":
+            attempts += 1
+            await asyncio.sleep(0.15)
+            if attempts == 1:
+                return httpx.Response(503)
+        return await server.handle(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(IntegrationError):
+            await Vkusvill(client, "https://mcp.vkusvill.ru/mcp", timeout=0.25).search("яблоки")
+    assert attempts == 2

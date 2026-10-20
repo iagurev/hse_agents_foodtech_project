@@ -145,6 +145,28 @@ def _http_status(exc: BaseException) -> int | None:
     return None
 
 
+def _transient(exc: BaseException) -> bool:
+    """Разрешает повтор только для известных временных отказов транспорта.
+
+    :param exc: Исходная ошибка, в том числе группа SDK
+    :return: Можно ли повторить операцию в оставшемся временном бюджете
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return all(_transient(item) for item in exc.exceptions)
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {429, 500, 502, 503, 504}
+    return isinstance(
+        exc, (httpx.NetworkError, httpx.RemoteProtocolError, httpx.TimeoutException, TimeoutError)
+    )
+
+
+def _error_types(exc: BaseException) -> list[str]:
+    """Возвращает типы вложенных ошибок без содержимого запроса или ответа."""
+    if isinstance(exc, BaseExceptionGroup):
+        return [name for item in exc.exceptions for name in _error_types(item)]
+    return [type(exc).__name__]
+
+
 class Vkusvill:
     """Прямой клиент публичного MCP ВкусВилла без авторизации и локального сервера."""
 
@@ -152,19 +174,27 @@ class Vkusvill:
         self.client, self.mcp_url, self.timeout = client, mcp_url, timeout
 
     async def _call(self, name: str, arguments: dict) -> dict:
-        with stage(name, arguments) as span:
-            result = await self._request(name, arguments)
-            outcome(span, result)
-            return result
+        deadline = time.monotonic() + self.timeout
+        for attempt in range(2):
+            try:
+                with stage(name, arguments | {"attempt": attempt + 1}) as span:
+                    result = await self._request(name, arguments, deadline - time.monotonic())
+                    outcome(span, result)
+                    return result
+            except IntegrationError as exc:
+                if attempt or not _transient(exc.__cause__ or exc) or time.monotonic() >= deadline:
+                    raise
+                logger.bind(tool=name, attempt=attempt + 1).warning("Retrying transient MCP failure")
+        raise AssertionError("Unreachable")
 
-    async def _request(self, name: str, arguments: dict) -> dict:
+    async def _request(self, name: str, arguments: dict, timeout: float) -> dict:
         started = time.monotonic()
         try:
             # Каждый вызов владеет своей сессией; HTTP-пул общий, параллельные поиски независимы.
-            async with asyncio.timeout(self.timeout):
+            async with asyncio.timeout(timeout):
                 async with streamable_http_client(self.mcp_url, http_client=self.client) as (read, write, _):
                     async with ClientSession(
-                        read, write, read_timeout_seconds=timedelta(seconds=self.timeout)
+                        read, write, read_timeout_seconds=timedelta(seconds=timeout)
                     ) as session:
                         await session.initialize()
                         # SDK проверяет результат по схеме; получаем её до операции создания ссылки.
@@ -177,7 +207,7 @@ class Vkusvill:
                 "Vkusvill MCP operation failed",
                 tool=name,
                 status_code=status,
-                error_type=type(exc).__name__,
+                error_types=_error_types(exc),
                 elapsed_seconds=time.monotonic() - started,
             )
             if isinstance(exc, IntegrationError):

@@ -30,7 +30,7 @@ class Editor:
 
     async def generate(self, prompt, schema, payload, usage, effort="low"):
         assert prompt in {"edit_plan", "edit_cart"}
-        assert effort == "low"
+        assert effort == ("medium" if prompt == "edit_plan" else "low")
         assert not {"catalog", "context", "memory", "dialogue"} & payload.keys()
         self.calls.append(copy.deepcopy(payload))
         usage.requests += 1
@@ -131,6 +131,9 @@ async def test_plan_full_version_no_catalog_and_replay(store, catalog, monkeypat
     assert result.data["meals"] == updated.model_dump()["meals"]
     assert result.data["totals"]["mean_rub"] == 50
     assert editor.calls[0]["current_plan"] == initial.data
+    assert editor.calls[0]["recipes"][0]["recipe_id"] == "r1"
+    assert editor.calls[0]["recipes"][0]["nutrition"]["kcal"] == 180
+    assert "ingredients" not in editor.calls[0]["recipes"][0]
     assert await store.get_object("u", "plan", initial.data["plan_id"]) == initial
     assert result.data["parent_id"] == initial.data["plan_id"]
     assert await planner.edit("u", "edit", initial.data["plan_id"], "Повтор", RunUsage()) == result
@@ -195,6 +198,74 @@ async def test_cart_quantity_keeps_snapshot_no_reselection(store, catalog):
     assert await shopper.edit("u", "edit", initial.data["cart_id"], "Повтор", RunUsage()) == result
     assert len(editor.calls) == len(products.links) == 1
     assert await store.get_object("u", "cart", initial.data["cart_id"]) == initial
+
+
+async def test_legacy_cart_null_selection_retains_confirmed_sku(store, catalog):
+    initial = await save_cart(store)
+    editor, products = Editor([cart(amount=600, sku_id=None)]), Products()
+    result = await Shopper(store, catalog, products, editor).edit(
+        "u", "legacy-edit", initial.data["cart_id"], "Овсянки 600 г", RunUsage()
+    )
+    assert editor.calls[0]["current_cart"]["products"][0]["requested_sku_id"] == "old"
+    assert result.status == "ok"
+    assert products.links == [{"old": 2}]
+    assert result.data["products"][0]["requested_sku_id"] == "old"
+    assert (await store.get_object("u", "cart", initial.data["cart_id"])).data["products"][0][
+        "requested_sku_id"
+    ] is None
+
+
+async def test_explicit_unresolved_selection_does_not_restore_old_sku(store, catalog):
+    initial = await save_cart(store)
+    changed = cart(sku_id=None)
+    changed.unresolved = [
+        UnresolvedProduct(product_id="oats", recipe_ids=["r1"], reason="Прежний товар больше не подходит")
+    ]
+    result = await Shopper(store, catalog, Products(), Editor([changed])).edit(
+        "u", "unselect", initial.data["cart_id"], "Этот товар больше не подходит", RunUsage()
+    )
+    assert result.status == "partial"
+    assert result.data["items"] == []
+    assert "больше не подходит" in result.data["unresolved"][0]["reason"]
+
+
+async def test_sku_replacement_preserves_other_lines_and_converts_package(store, catalog_writer, product):
+    from app.models import UnitConversion
+
+    milk = product.model_copy(
+        update={
+            "product_id": "milk",
+            "name": "Молоко",
+            "conversions": {
+                "ml": UnitConversion(factor=1.03, source_url="https://example.org/density", note="г/мл")
+            },
+        }
+    )
+    catalog = catalog_writer([product, milk], [])
+    initial = await save_cart(store)
+    data = copy.deepcopy(initial.data)
+    data["limits"]["budget_rub"] = 1000
+    data["products"].append(CartProduct(product_id="milk", amount=2245.83, recipe_ids=["r1"]).model_dump())
+    old_milk = sku("milk-old").model_copy(update={"package_unit": "ml", "package_amount": 1000})
+    data["items"].append({"product_id": "milk", "product": old_milk.model_dump(), "packages": 3})
+    initial = await store.save_object("u", "cart", data, Result(), "with-milk")
+    replacement = old_milk.model_copy(
+        update={"sku_id": "milk-new", "title": "Молоко безлактозное", "package_amount": 970}
+    )
+    await store.cache_skus([replacement])
+    changed = cart(sku_id=None, budget=1000)
+    changed.products.append(
+        CartProduct(product_id="milk", amount=2245.83, recipe_ids=["r1"], requested_sku_id="milk-new")
+    )
+    products = Products()
+    result = await Shopper(store, catalog, products, Editor([changed])).edit(
+        "u", "replace-milk", initial.data["cart_id"], "Молоко замени на milk-new", RunUsage()
+    )
+    assert result.status == "ok"
+    assert result.data["total_is_complete"]
+    assert result.data["unresolved"] == []
+    assert products.links == [{"old": 1, "milk-new": 3}]
+    assert result.data["items"][0]["product"] == initial.data["items"][0]["product"]
 
 
 @pytest.mark.parametrize("operation", ["search", "analogs"])

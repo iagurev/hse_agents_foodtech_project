@@ -59,7 +59,8 @@ async def test_wire_schema_nested_budget_usage_and_private_catalog(
             content = payload["messages"][-1]["content"]
             inner = json.loads(content)
             assert content == json.dumps(inner, ensure_ascii=False, separators=(",", ":"))
-            assert inner["catalog"][0]["ingredients"] == ["Овсянка"]
+            table = inner["catalog"]
+            assert table["by_difficulty"]["easy"][0][table["columns"].index("ingredients")] == ["Овсянка"]
             assert not payload.get("tools")
             assert payload["model"] == "openai/gpt-6-luna"
             assert payload["provider"]["only"] == ["openai"]
@@ -68,7 +69,7 @@ async def test_wire_schema_nested_budget_usage_and_private_catalog(
                 "role": "assistant",
                 "content": json.dumps(
                     {
-                        "meals": [{"day": 1, "meal": "breakfast", "recipe_id": "r1", "servings": 1}],
+                        "meals": [{"days": [1], "meal": "breakfast", "recipe_id": "r1", "servings": 1}],
                         "explanation": "Готово",
                     }
                 ),
@@ -315,3 +316,49 @@ async def test_truncated_summary_is_charged_but_rejected(finish_reason):
         with pytest.raises(UnexpectedModelBehavior):
             await gateway.compact({"history": []}, usage)
         assert usage.requests == 1 and usage.details["cost_nano_usd"] == 1000000
+
+
+async def test_editor_native_response_expands_before_returning_public_revision():
+    from pydantic_ai.usage import RunUsage
+
+    from app.models import PlanRevision
+
+    def response(request):
+        body = json.loads(request.content)
+        schema = body["response_format"]["json_schema"]["schema"]
+        assert "days" in schema["properties"]["meals"]["items"]["properties"]
+        assert "day" not in schema["properties"]["meals"]["items"]["properties"]
+        content = {
+            "days": 3,
+            "limits": {"budget_rub": None, "max_difficulty": "advanced"},
+            "meals": [{"days": [1, 3], "meal": "Ужин", "recipe_id": "saved-id", "servings": 1.25}],
+            "explanation": "Сохранён ужин двух дней",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "id": "edit",
+                "object": "chat.completion",
+                "model": body["model"],
+                "provider": "OpenAI",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "native_finish_reason": "stop",
+                        "message": {"role": "assistant", "content": json.dumps(content)},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+        gateway = ModelGateway(build_model(Config(_env_file=None, openrouter_api_key="test"), client), 12)
+        result = await gateway.generate("edit_plan", PlanRevision, {}, RunUsage(), "medium")
+    assert isinstance(result, PlanRevision)
+    assert [(m.day, m.recipe_id, m.servings) for m in result.meals] == [
+        (1, "saved-id", 1.25),
+        (3, "saved-id", 1.25),
+    ]
+    assert result.days == 3 and result.limits.max_difficulty == "advanced"

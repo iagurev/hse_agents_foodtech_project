@@ -194,7 +194,16 @@ def assemble(
     total, issues = cart_total(quantities, sku_prices, limits)
     return (
         {
-            "products": [p.model_dump(mode="json") for p in products],
+            "products": [
+                p.model_dump(mode="json")
+                | {
+                    "requested_sku_id": next(
+                        (row["sku_id"] for row in selected if row["product_id"] == p.product_id),
+                        p.requested_sku_id,
+                    )
+                }
+                for p in products
+            ],
             "items": selected,
             "unresolved": unresolved,
             "subtotal_rub": total,

@@ -40,6 +40,7 @@ class Config(BaseSettings):
     compaction_timeout_seconds: float = Field(default=180, gt=0)
     compaction_request_limit: int = Field(default=2, ge=1, le=2)
     guard_model: str = "google/gemini-2.5-flash-lite"
+    guard_fallback_model: str | None = "openai/gpt-6-luna"
     guard_timeout_seconds: float = Field(default=60, gt=0)
     integration_timeout_seconds: float = Field(default=60, gt=0)
     image_timeout_seconds: float = Field(default=20, gt=0)

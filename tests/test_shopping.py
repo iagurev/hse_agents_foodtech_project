@@ -48,6 +48,45 @@ class Selector:
         )
 
 
+async def test_selection_excludes_unquotable_skus_but_keeps_composition_and_saved_provenance(store, catalog):
+    class Search(Products):
+        async def search(self, query, limit):
+            return [
+                Product(sku_id="unknown", title="Без фасовки", price_rub=10),
+                Product(
+                    sku_id="sku1",
+                    title="Овсянка 500 г",
+                    price_rub=100,
+                    package_amount=500,
+                    package_unit="g",
+                    composition="Овёс",
+                    source_url="https://example.org/sku1",
+                    package_basis="Маркировка",
+                ),
+            ]
+
+    class Check(Selector):
+        async def generate(self, prompt, schema, payload, usage, effort="low"):
+            options = payload["candidates"]["oats"]
+            assert len(options) == 1
+            assert options[0]["composition"] == "Овёс"
+            assert options[0]["purchase"]["quantity"] == 1
+            assert "source_url" not in options[0]
+            return await super().generate(prompt, schema, payload, usage, effort)
+
+    result = await Shopper(store, catalog, Search(), Check()).run(
+        "u",
+        "quoted-only",
+        RecipesSource.model_validate({"type": "recipes", "items": [{"recipe_id": "r1", "servings": 1}]}),
+        CartLimits(budget_rub=None),
+        PersonContext(),
+        RunUsage(),
+    )
+    assert result.status == "ok"
+    assert result.data["items"][0]["product"]["source_url"] == "https://example.org/sku1"
+    assert result.data["products"][0]["requested_sku_id"] == "sku1"
+
+
 def test_aggregation_by_product_id_preserves_purpose() -> None:
     result = aggregate(
         [

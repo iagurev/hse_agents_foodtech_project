@@ -351,8 +351,10 @@ class Runs:
                 )
                 yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
                 previous = encoded
-            if state["state"] not in ACTIVE:
-                return
+                # live мог измениться во время подготовки карточек; завершаем только
+                # после доставки именно конечного снимка, а не по текущему live.
+                if snapshot["state"] not in ACTIVE:
+                    return
             if time.monotonic() - heartbeat >= 10:
                 yield ": heartbeat\n\n"
                 heartbeat = time.monotonic()

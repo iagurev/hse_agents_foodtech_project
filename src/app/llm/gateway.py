@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Literal, Protocol, TypeVar
+from typing import Literal, Protocol, TypeVar, cast
 
 from loguru import logger
 from pydantic import BaseModel, JsonValue
@@ -11,6 +11,9 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import RunUsage, UsageLimits
 
 from app.assistant.prompts import PromptName, load_prompt
+from app.models import PlanDraft, PlanRevision
+from app.planning.transport import RepeatedPlan, RepeatedRevision, planning_input
+from app.shopping.transport import selection_input
 
 Output = TypeVar("Output", bound=BaseModel)
 Response = TypeVar("Response")
@@ -84,6 +87,10 @@ class ModelGateway:
         """
         started = time.monotonic()
         before = (usage.requests, usage.input_tokens, usage.output_tokens)
+        if operation == "meal_plan":
+            payload = planning_input(payload)
+        elif operation == "product_selection":
+            payload = selection_input(payload)
         async with agent.iter(
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             usage=usage,
@@ -138,17 +145,22 @@ class ModelGateway:
         model = self.model
         if prompt == "meal_plan" and self.planning_model is not None:
             model, effort = self.planning_model, self.planning_effort
+        output_schema = {
+            ("meal_plan", PlanDraft): RepeatedPlan,
+            ("edit_plan", PlanRevision): RepeatedRevision,
+        }.get((prompt, schema), schema)
         agent = Agent(
             model,
             name=f"{prompt}.{'repair' if payload.get('feedback') else 'generate'}",
             instrument=self.instrumentation,
             instructions=self.prompts[prompt],
-            output_type=NativeOutput(schema, strict=True),
+            output_type=NativeOutput(output_schema, strict=True),
             retries=0,
             output_retries=0,
             model_settings={"openrouter_reasoning": {"effort": effort}},
         )
-        return await self._run(agent, prompt, payload, usage)
+        result = await self._run(agent, prompt, payload, usage)
+        return cast(Output, result.expand() if isinstance(result, RepeatedPlan) else result)
 
     async def compact(
         self,

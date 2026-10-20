@@ -1,3 +1,5 @@
+import re
+
 from pydantic import ValidationError
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import RunUsage
@@ -130,11 +132,23 @@ class Planner:
         source = await self.store.get_object(user_id, "plan", plan_id)
         if source.status == "error":
             return source
-        payload = {"current_plan": source.data, "request": request}
+        recipe_ids = [m["recipe_id"] for m in source.data["meals"]] + re.findall(r"[\w-]+", request)
+        recipes = await self.catalog.recipes_by_ids(recipe_ids)
+        payload = {
+            "current_plan": source.data,
+            "request": request,
+            "recipes": [
+                recipe.model_dump(
+                    mode="json",
+                    include={"recipe_id", "title", "base_serving", "nutrition", "cost", "difficulty"},
+                )
+                for recipe in recipes.values()
+            ],
+        }
         fixed_limits = None
         for attempt in range(2):
             try:
-                candidate = await self.generator.generate("edit_plan", PlanRevision, payload, usage, "low")
+                candidate = await self.generator.generate("edit_plan", PlanRevision, payload, usage, "medium")
             except (UnexpectedModelBehavior, ValidationError) as exc:
                 if attempt:
                     return Result.failed("MODEL_FORMAT", "Редактор дважды не вернул результат по схеме")
