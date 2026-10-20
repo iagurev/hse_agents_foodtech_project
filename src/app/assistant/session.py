@@ -33,7 +33,7 @@ from app.llm import Generator
 from app.planning import Planner
 from app.progress import EventSink
 from app.retrieval.service import RecipeRetriever
-from app.shopping import Shopper
+from app.shopping.service import Shopper
 from app.storage import Store
 
 

@@ -9,7 +9,7 @@ from app.integrations import Products
 from app.models import PersonContext
 from app.planning import Planner
 from app.progress import EventSink, Progress
-from app.shopping import Shopper
+from app.shopping.service import Shopper
 from app.storage import Store
 
 if TYPE_CHECKING:

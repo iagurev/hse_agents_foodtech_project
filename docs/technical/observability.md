@@ -71,7 +71,7 @@ LANGFUSE_ENVIRONMENT=local
 
 - `tracing.py`: жизненный цикл, корневой ход, этапы, статусы и точные usage/cost.
 - `web/runs.py`: граница нового хода; `assistant/agent.py`, `web/guard.py`, `llm.py`: передача SDK instrumentation через зависимости.
-- `assistant/tools.py`: статус существующего tool-span; `planning.py`, `shopping.py`, `integrations.py`: этапы операций.
+- `assistant/tools.py`: статус существующего tool-span; `planning.py`, `shopping/service.py`, `integrations.py`: этапы операций.
 - [Официальная интеграция Pydantic AI](https://langfuse.com/integrations/frameworks/pydantic-ai), [изоляция provider и расширенные настройки SDK](https://langfuse.com/docs/observability/sdk/advanced-features).
 
 Новый оркестратор, отдельный логирующий агент и трассировочные tools не вводились. [Результаты проверки](verification.md#langfuse-анкета-и-readme--2026-10-20).

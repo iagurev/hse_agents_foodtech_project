@@ -72,7 +72,7 @@ components:
 
 Интерфейс предназначен для телефона: один столбец, светлое поле, зелёные действия и спокойная плотность. Устройство не обрамлено декоративной рамкой. Крупные заголовки используются на входе и в пустом чате; рабочие экраны опираются на короткие подписи, списки и числовые данные.
 
-Источник значений — [основные стили](../../frontend/src/styles.css), [формы](../../frontend/src/forms.css), [чат](../../frontend/src/chat.css) и [планы, рецепты, покупки](../../frontend/src/objects.css). Общие состояния и изображения реализованы в [ui.tsx](../../frontend/src/ui.tsx), оболочка и навигация — в [main.tsx](../../frontend/src/main.tsx).
+Источник значений — [основные стили](../../frontend/src/styles/styles.css), [формы](../../frontend/src/styles/forms.css), [чат](../../frontend/src/styles/chat.css) и [планы, рецепты, покупки](../../frontend/src/styles/objects.css). Общие состояния и изображения реализованы в [ui.tsx](../../frontend/src/components/ui.tsx), оболочка и навигация — в [main.tsx](../../frontend/src/main.tsx).
 
 ## Colors
 

@@ -15,16 +15,18 @@ import '@fontsource/manrope/700.css';
 import '@fontsource/manrope/800.css';
 import { api, ApiError, errorText, go } from './api';
 import type { Me, ChatDraft, ObjectReference } from './api';
-import { Auth, Settings } from './Profile';
-import { ChatScreen } from './Chat';
-import { Collections } from './Collections';
-import { CartDetail, PlanDetail, RecipeDetail } from './Details';
-import { ErrorNote, Loading } from './ui';
+import { Auth, Settings } from './screens/Profile';
+import { ChatScreen } from './screens/Chat';
+import { Collections } from './screens/Collections';
+import { CartDetail } from './screens/CartDetail';
+import { PlanDetail } from './screens/PlanDetail';
+import { RecipeDetail } from './screens/RecipeDetail';
+import { ErrorNote, Loading } from './components/ui';
 import { positiveNumber } from './preview';
-import './styles.css';
-import './forms.css';
-import './chat.css';
-import './objects.css';
+import './styles/styles.css';
+import './styles/forms.css';
+import './styles/chat.css';
+import './styles/objects.css';
 
 function App() {
   const [me, setMe] = useState<Me | null>();

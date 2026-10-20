@@ -1,7 +1,8 @@
+import type { Totals } from '../api';
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { ArrowLeft, ArrowUpRight, ChefHat, Ellipsis, X } from 'lucide-react';
-import { api, errorText, go } from './api';
+import { api, errorText, go, number } from '../api';
 
 export function ErrorNote({ text }: { text: string }) {
   const ref = useRef<HTMLParagraphElement>(null);
@@ -250,5 +251,23 @@ export function ObjectActions({
         </Sheet>
       )}
     </>
+  );
+}
+
+export function Nutrition({ value }: { value: Omit<Totals, 'mean_rub'> | null }) {
+  return (
+    <div className="nutrition">
+      {[
+        ['ккал', value?.kcal],
+        ['белки, г', value?.protein_g],
+        ['жиры, г', value?.fat_g],
+        ['углев., г', value?.carbs_g],
+      ].map(([label, v]) => (
+        <div key={label}>
+          <strong>{number(v as number)}</strong>
+          <span>{label}</span>
+        </div>
+      ))}
+    </div>
   );
 }

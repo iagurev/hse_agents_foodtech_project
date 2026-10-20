@@ -23,7 +23,7 @@ from app.llm import ModelGateway
 from app.models import Result
 from app.network import system_tls_context
 from app.retrieval.service import create_retriever
-from app.shopping import Shopper
+from app.shopping.service import Shopper
 from app.tracing import Tracing
 from app.web.contracts import (
     CartEdit,

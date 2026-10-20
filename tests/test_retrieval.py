@@ -339,7 +339,7 @@ async def test_web_search_does_not_inherit_profile_and_needs_no_llm(retrieval, s
 
     import httpx
 
-    from app.shopping import Shopper
+    from app.shopping.service import Shopper
     from app.web.server import create_app
     from app.web.storage import WebStore
 

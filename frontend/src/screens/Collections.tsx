@@ -9,9 +9,9 @@ import {
   Search,
   ShoppingBag,
 } from 'lucide-react';
-import { api, difficulties, errorText, openDetail, money } from './api';
-import type { Cart, Plan, Recipe, RecipeSearchData, RecipeSearchLimits, RecipeSummary, Result } from './api';
-import { Empty, ErrorNote, FoodImage, Loading, useRestoreScroll } from './ui';
+import { api, difficulties, errorText, openDetail, money } from '../api';
+import type { Cart, Plan, Recipe, RecipeSearchData, RecipeSearchLimits, RecipeSummary, Result } from '../api';
+import { Empty, ErrorNote, FoodImage, Loading, useRestoreScroll } from '../components/ui';
 
 export function Collections({
   kind,

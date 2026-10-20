@@ -26,7 +26,7 @@ from app.models import (
     SkuCartRevision,
     SkusSource,
 )
-from app.shopping import Shopper
+from app.shopping.service import Shopper
 
 
 class NoSelection:

@@ -19,7 +19,8 @@ from app.models import (
     UnresolvedProduct,
 )
 from app.planning import Planner
-from app.shopping import Shopper
+from app.shopping.calculations import assemble
+from app.shopping.service import Shopper
 
 
 class Editor:
@@ -367,7 +368,7 @@ def test_reassembling_unresolved_product_preserves_reason(product):
         {"product_id": product.product_id, "recipe_ids": ["r1"], "reason": "Овсянка: Фасовка неизвестна"}
     ]
     for _ in range(3):
-        data, _, _ = Shopper.assemble(
+        data, _, _ = assemble(
             products, {product.product_id: product}, {}, unresolved, {}, CartLimits(budget_rub=None)
         )
         assert data["unresolved"] == unresolved

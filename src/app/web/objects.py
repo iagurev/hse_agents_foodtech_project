@@ -7,7 +7,7 @@ from app.catalog import Catalog
 from app.integrations import IntegrationError
 from app.models import CartLimits, PlanDraft, PlanLimits, Result, SkuAmount, StoredSkusSource
 from app.planning import evaluate
-from app.shopping import Shopper
+from app.shopping.service import Shopper
 from app.web.contracts import CartEdit, PlanEdit
 from app.web.storage import WebStore
 

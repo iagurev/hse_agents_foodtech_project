@@ -1,9 +1,9 @@
 import { useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { ArrowLeft, ArrowRight, Check, Eye, EyeOff, Leaf, LogOut } from 'lucide-react';
-import { api, ApiError, activities, budgetLabel, budgets, difficulties, errorText, goals } from './api';
-import type { Me, Profile } from './api';
-import { BackHeader, ErrorNote, Sheet } from './ui';
+import { api, ApiError, activities, budgetLabel, budgets, difficulties, errorText, goals } from '../api';
+import type { Me, Profile } from '../api';
+import { BackHeader, ErrorNote, Sheet } from '../components/ui';
 
 export function ProfileForm({
   value,

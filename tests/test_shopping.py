@@ -14,7 +14,8 @@ from app.models import (
     Result,
     Selection,
 )
-from app.shopping import Shopper, aggregate
+from app.shopping.calculations import aggregate, assemble
+from app.shopping.service import Shopper
 
 
 class Products:
@@ -317,7 +318,7 @@ async def test_direct_sku_progress_skips_search_and_selection(store, catalog):
     "amount,quantity,cost", [(250, 0.25, 232), (281.25, 0.29, 269.12), (300, 0.3, 278.4), (1, 0.01, 9.28)]
 )
 def test_weighted_quote_rounds_up_to_hundredth(amount, quantity, cost):
-    from app.shopping import purchase_quote
+    from app.shopping.calculations import purchase_quote
 
     sku = parse_product(
         {"id": 1066, "name": "Индейка", "unit": "кг", "price": {"current": 928, "currency": "RUB"}}
@@ -395,7 +396,7 @@ async def test_fractional_direct_quantity_requires_confirmed_sale_unit(store, ca
 
 def test_explicit_conversion_quotes_edible_amount_and_rounds_packages(product):
     from app.models import UnitConversion
-    from app.shopping import purchase_quote
+    from app.shopping.calculations import purchase_quote
 
     estimate = UnitConversion(factor=50, source_url="https://example.org/eggs", note="Оценка съедобной части")
     sku = Product(sku_id="7", title="Яйца 10 шт", price_rub=120, package_amount=10, package_unit="pcs")
@@ -410,7 +411,7 @@ def test_explicit_conversion_quotes_edible_amount_and_rounds_packages(product):
     assert purchase_quote(960, "g", oil, density)["quantity"] == 1
     assert purchase_quote(960.1, "g", oil, density)["quantity"] == 2
     normalized = product.model_copy(update={"conversions": {"pcs": estimate}})
-    payload, _, quantities = Shopper.assemble(
+    payload, _, quantities = assemble(
         [CartProduct(product_id=product.product_id, amount=501, recipe_ids=["r1"])],
         {product.product_id: normalized},
         {product.product_id: sku},
