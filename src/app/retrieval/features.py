@@ -3,8 +3,7 @@ from functools import lru_cache
 
 import pymorphy3
 
-from app.models import NormalizedProduct, PersonContext, Recipe
-from app.retrieval.models import SearchConstraints, SearchDiagnostic
+from app.models import NormalizedProduct, Recipe, RecipeSearchLimits
 
 STOP = frozenset(
     "и или в на с со из к по для это рецепт блюдо приготовить сделать покажи найти хочу мне пожалуйста что как можно без не до за минут минута еда меню день неделя".split()
@@ -100,20 +99,32 @@ def equipment_features(recipe: Recipe) -> dict:
     return {"groups": groups, "evidence": evidence, "unknown_heat": unknown_heat}
 
 
-class Conditions:
-    """Разрешает только поддерживаемые условия; свободный текст не сертифицирует состав."""
+class RecipeFilter:
+    """Фильтрует каталог по явным limits, не анализируя текст поискового запроса."""
 
     def __init__(
-        self, language: Language, products: dict[str, NormalizedProduct], aliases: dict[str, str]
+        self,
+        recipes: dict[str, Recipe],
+        products: dict[str, NormalizedProduct],
+        aliases: dict[str, str],
+        language: Language | None = None,
+        features: dict[str, dict] | None = None,
     ) -> None:
-        self.language, self.products = language, products
+        self.recipes, self.products = recipes, products
+        self.language = language or Language()
+        language = self.language
+        self.features = (
+            features
+            if features is not None
+            else {rid: equipment_features(recipe) for rid, recipe in recipes.items()}
+        )
         self.product_words = {pid: set(language.words(p.name)) for pid, p in products.items()}
         self.aliases: dict[str, set[str]] = {}
         for alias, pid in [*aliases.items(), *[(p.name, pid) for pid, p in products.items()]]:
             key = " ".join(language.words(alias))
             self.aliases.setdefault(key, set()).add(pid)
 
-    def product_ids(self, name: str) -> set[str]:
+    def _product_ids(self, name: str) -> set[str]:
         """Разрешает имя ингредиента или группы в существующие ID.
 
         :param name: Название или product_id
@@ -136,114 +147,54 @@ class Conditions:
         )
         return matches
 
-    def parse(self, query: str) -> tuple[str, SearchConstraints, list[SearchDiagnostic]]:
-        """Отделяет отрицания и простые ограничения от положительного блюда.
+    def apply(self, limits: RecipeSearchLimits) -> tuple[set[str], list[str]]:
+        """Отбирает допустимые рецепты до ранжирования и ограничения выдачи.
 
-        :param query: Текущий самодостаточный запрос
-        :return: Положительный текст, условия и непонятые фрагменты
+        :param limits: Явные условия без подстановки персонального контекста
+        :return: Допустимые ID и коды диагностики без пользовательского текста
         """
-        result = SearchConstraints()
-        diagnostics = []
-        pattern = r"\b(?:без|исключая|не ем|не употребляю|исключить)\s+([^.!;\n]+)"
-
-        def negative(match: re.Match) -> str:
-            """Извлекает отдельное отрицание из совпадения.
-
-            :param match: Фрагмент после без/исключая
-            :return: Пустая строка вместо отрицательного терма
-            """
-            phrase = re.split(r"\s+(?:за|до|на|для|но|кроме)\s+", match.group(1), maxsplit=1)[0]
-            positive_parts = []
-            for part in re.split(r",|\s+и\s+|\s+или\s+", phrase):
-                part = re.sub(r"^(?:без|исключая|не ем|не употребляю)\s+", "", part.strip(), flags=re.I)
-                if re.match(r"(?:хочу|покажи|приготов|нужен|завтрак|обед|ужин|перекус|десерт)\b", part, re.I):
-                    positive_parts.append(part)
-                    continue
-                if set(self.language.words(part)) & {"глютен", "лактоза", "аллерген"}:
-                    result.allergens.append(part)
-                    continue
-                devices = [d for d, p in DEVICES.items() if re.search(p, part.lower())]
-                if devices:
-                    result.forbidden_equipment.extend(devices)
-                elif self.product_ids(part):
-                    result.exclude_products.append(part)
-                else:
-                    diagnostics.append(
-                        SearchDiagnostic(
-                            code="UNRESOLVED_CONSTRAINT",
-                            message=f"Не удалось однозначно проверить условие «без {part[:100]}».",
-                        )
-                    )
-            return " " + " ".join(positive_parts) + " "
-
-        positive = re.sub(pattern, negative, query, flags=re.I)
-        for device, pattern_device in DEVICES.items():
-            if re.search(r"(?:нет|не использую)\s+(?:" + pattern_device + ")", query, flags=re.I):
-                result.forbidden_equipment.append(device)
-        time = re.search(r"(?:до|за|не более)\s*(\d+)\s*(?:мин|минут)", query, re.I)
-        if time:
-            result.max_total_minutes = float(time.group(1)) or None
-        for word, role in {
-            "завтрак": "breakfast",
-            "обед": "lunch",
-            "ужин": "dinner",
-            "перекус": "snack",
-            "десерт": "dessert",
-        }.items():
-            if word in self.language.words(query):
-                result.meal_roles.append(role)
-        if re.search(r"\bвеган", query, re.I):
-            result.diet = "vegan"
-        elif re.search(r"\bвегетариан", query, re.I):
-            result.diet = "vegetarian"
-        allergy_facts = re.sub(
-            r"\bнет\s+(?:аллерги\w*|непереносим\w*)|\b(?:аллерги\w*|непереносим\w*)\s+нет\b",
-            "",
-            query,
-            flags=re.I,
-        )
-        if re.search(r"аллерги|непереносим", allergy_facts, re.I):
-            result.allergens.append("указанная аллергия/непереносимость")
-        return positive.strip(), result, diagnostics
-
-    def resolve(
-        self, query: str, person: PersonContext, explicit: SearchConstraints | None
-    ) -> tuple[str, SearchConstraints, list[SearchDiagnostic]]:
-        """Учитывает актуальную память/анкету и текущий запрос без старого dialogue.
-
-        :param query: Текущий запрос
-        :param person: Актуальный контекст пользователя
-        :param explicit: Явные поддерживаемые условия
-        :return: Положительная часть, объединённые условия и диагностика
-        """
-        profile = str(person.questionnaire.get("restrictions", "")) + "\n" + person.memory
-        _, baseline, diagnostics = self.parse(profile)
-        positive, current, notes = self.parse(query)
-        diagnostics.extend(notes)
-        data = baseline.model_dump()
-        # При явной структуре она полностью описывает действующие условия, включая снятые запреты.
-        if explicit is not None:
-            data.update(explicit.model_dump(exclude_unset=True))
-        for key in ["exclude_products", "forbidden_equipment", "allergens", "meal_roles"]:
-            data[key] = list(dict.fromkeys(data[key] + getattr(current, key)))
-        for key in ["max_total_minutes", "diet", "max_difficulty"]:
-            if getattr(current, key) is not None:
-                data[key] = getattr(current, key)
-        if data["max_difficulty"] is None and not (
-            explicit is not None and "max_difficulty" in explicit.model_fields_set
-        ):
-            data["max_difficulty"] = person.questionnaire.get("cooking_difficulty")
-        return positive, SearchConstraints.model_validate(data), diagnostics
-
-    def preferences(self, person: PersonContext) -> set[str]:
-        """Извлекает известные любимые продукты для мягкого ранжирования.
-
-        :param person: Актуальная память/анкета без исторического dialogue
-        :return: ID без назначения новых запретов
-        """
-        result = set()
-        text = person.memory + "\n" + str(person.questionnaire.get("preferences", ""))
-        for match in re.finditer(r"(?<!не )\b(?:люблю|предпочитаю|нравится)\s+([^.!;\n]+)", text, re.I):
-            for name in re.split(r",|\s+и\s+", match.group(1)):
-                result.update(self.product_ids(name.strip()))
-        return result
+        excluded, forbidden = set(), set()
+        for name in limits.exclude_products or []:
+            ids = self._product_ids(name)
+            if not ids:
+                return set(), ["UNRESOLVED_CONSTRAINT"]
+            excluded.update(ids)
+        if limits.diet:
+            groups = ["мясо", "рыба", "креветки", "желатин"]
+            if limits.diet == "vegan":
+                groups += ["молочное", "яйцо", "мед"]
+            for name in groups:
+                excluded.update(self._product_ids(name))
+        for name in limits.forbidden_equipment or []:
+            matched = {d for d, pattern in DEVICES.items() if re.search(pattern, name.lower())}
+            if not matched:
+                return set(), ["UNRESOLVED_CONSTRAINT"]
+            forbidden.update(matched)
+        ranks = {"easy": 0, "intermediate": 1, "advanced": 2}
+        allowed, uncertain = set(), False
+        for rid, recipe in self.recipes.items():
+            if excluded & {i.product_id for i in recipe.ingredients}:
+                continue
+            if limits.max_difficulty and ranks[recipe.difficulty] > ranks[limits.max_difficulty]:
+                continue
+            if limits.max_total_minutes is not None and recipe.total_minutes > limits.max_total_minutes:
+                continue
+            if limits.budget_rub is not None and recipe.cost.mean_rub > limits.budget_rub * 1.05:
+                continue
+            if limits.meal_roles and not set(limits.meal_roles) & set(recipe.meal_roles):
+                continue
+            features = self.features[rid]
+            if forbidden and features["unknown_heat"]:
+                uncertain = True
+                continue
+            if any(
+                all(
+                    device in forbidden
+                    or (device == "микроволновая печь с грилем" and "микроволновая печь" in forbidden)
+                    for device in group
+                )
+                for group in features["groups"]
+            ):
+                continue
+            allowed.add(rid)
+        return allowed, ["INSUFFICIENT_EVIDENCE"] if uncertain else []

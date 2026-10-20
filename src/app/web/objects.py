@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from pydantic import JsonValue
 
 from app.catalog import Catalog
+from app.integrations import IntegrationError
 from app.models import CartLimits, PlanDraft, PlanLimits, Result, SkuAmount, StoredSkusSource
 from app.planning import evaluate
 from app.shopping import Shopper
@@ -60,7 +61,12 @@ class ObjectEditor:
                 raise HTTPException(422, "Некорректные нерешённые позиции")
             limits = CartLimits.model_validate(current["limits"])
             items = [SkuAmount(**i.model_dump()) for i in edit.items]
-            payload, issues, quantities = await self.shopper.assemble_skus(items, limits, current["items"])
+            try:
+                payload, issues, quantities = await self.shopper.assemble_skus(
+                    items, limits, current["items"]
+                )
+            except IntegrationError as exc:
+                raise HTTPException(422, str(exc)) from exc
             payload["unresolved"] = [current["unresolved"][i] for i in indices]
             if payload["unresolved"]:
                 payload["total_is_complete"] = False

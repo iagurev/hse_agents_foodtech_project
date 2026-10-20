@@ -72,6 +72,9 @@ async def test_cart_aggregates_before_search_uses_cache_and_replays(store, catal
     limits = CartLimits(budget_rub=200.0)
     result = await shopper.run("u", "cart1", source, limits, PersonContext(), RunUsage())
     assert result.status == "ok"
+    from app.assistant.tools import CartResult
+
+    assert CartResult.from_result(result).data.items[0].packages == 1
     assert result.data["products"][0]["amount"] == 150
     assert result.data["items"][0]["product_id"] == "oats"
     assert not {"needs", "notices"} & result.data.keys()
@@ -211,7 +214,7 @@ async def test_batch_selection_uses_ten_candidates_per_product(
     assert len(result.data["items"]) == 2
 
 
-async def test_public_product_searches_have_fixed_top_ten(store):
+async def test_public_product_searches_have_fixed_top_ten(store, catalog):
     from types import SimpleNamespace
 
     from app.assistant.tools import get_product_analogs, search_products
@@ -224,6 +227,241 @@ async def test_public_product_searches_have_fixed_top_ten(store):
         async def analogs(self, sku_id, limit):
             return await self.search(sku_id, limit)
 
-    ctx = SimpleNamespace(deps=SimpleNamespace(products=Oversized(), store=store))
+    ctx = SimpleNamespace(deps=SimpleNamespace(products=Oversized(), store=store, catalog=catalog))
     assert len((await search_products(ctx, ProductQuery(query="товар"))).data) == 10
     assert len((await get_product_analogs(ctx, SkuId(sku_id="sku"))).data) == 10
+
+
+async def test_progress_counts_unique_searches_empty_and_error(store, catalog_writer, recipe, product):
+    import asyncio
+
+    from app.integrations import IntegrationError
+    from app.models import Ingredient
+    from app.progress import Progress
+
+    products = [product.model_copy(update={"product_id": str(i), "name": str(i)}) for i in range(3)]
+    recipe = recipe.model_copy(
+        update={"ingredients": [Ingredient(product_id=p.product_id, amount=50) for p in products]}
+    )
+    catalog = catalog_writer(products, [recipe])
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    class Search(Products):
+        async def search(self, query, limit):
+            await asyncio.sleep(0)
+            if query == "1":
+                return []
+            if query == "2":
+                raise IntegrationError("Unavailable")
+            return await super().search(query, limit)
+
+    source = RecipesSource.model_validate(
+        {"type": "recipes", "items": [{"recipe_id": "r1", "servings": 2}, {"recipe_id": "r1", "servings": 1}]}
+    )
+    shopper = Shopper(store, catalog, Search(), Selector())
+    result = await shopper.run(
+        "u",
+        "count-progress",
+        source,
+        CartLimits(budget_rub=None),
+        PersonContext(),
+        RunUsage(),
+        progress=Progress(emit, "create_cart", "call"),
+    )
+    searches = [e for e in events if e["stage"] == "cart_search"]
+    assert [e["completed"] for e in searches] == [0, 1, 2, 3]
+    assert all(e["total"] == 3 for e in searches)
+    assert searches[-1]["found"] == 1
+    assert result.status == "partial" and len(result.data["unresolved"]) == 2
+    assert [e["stage"] for e in events[-4:]] == ["cart_select", "cart_calculate", "cart_link", "cart_save"]
+    assert all(e["found"] == 1 for e in events[-4:])
+    count = len(events)
+    await shopper.run(
+        "u",
+        "count-progress",
+        source,
+        CartLimits(budget_rub=None),
+        PersonContext(),
+        RunUsage(),
+        progress=Progress(emit),
+    )
+    assert len(events) == count
+
+
+async def test_direct_sku_progress_skips_search_and_selection(store, catalog):
+    from app.models import SkusSource
+    from app.progress import Progress
+
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    source = SkusSource.model_validate({"type": "skus", "items": [{"sku_id": "sku1", "packages": 1}]})
+    await Shopper(store, catalog, Products(), Selector()).run(
+        "u",
+        "sku-progress",
+        source,
+        CartLimits(budget_rub=None),
+        PersonContext(),
+        RunUsage(),
+        progress=Progress(emit),
+    )
+    assert [e["stage"] for e in events] == ["cart_calculate", "cart_link", "cart_save"]
+
+
+@pytest.mark.parametrize(
+    "amount,quantity,cost", [(250, 0.25, 232), (281.25, 0.29, 269.12), (300, 0.3, 278.4), (1, 0.01, 9.28)]
+)
+def test_weighted_quote_rounds_up_to_hundredth(amount, quantity, cost):
+    from app.shopping import purchase_quote
+
+    sku = parse_product(
+        {"id": 1066, "name": "Индейка", "unit": "кг", "price": {"current": 928, "currency": "RUB"}}
+    )
+    assert purchase_quote(amount, "g", sku) == {
+        "quantity": quantity,
+        "covered_amount": quantity * 1000,
+        "cost_rub": cost,
+    }
+    assert purchase_quote(amount, "ml", sku) is None
+    packaged = sku.model_copy(update={"sale_unit": None, "package_amount": 500})
+    assert purchase_quote(501, "g", packaged)["quantity"] == 2
+
+
+async def test_weighted_selection_quote_matches_saved_cart_and_legacy_cache(store, catalog):
+    import hashlib
+    import json
+    import time
+
+    sku = Product(
+        sku_id="sku1",
+        title="Овсянка на вес",
+        price_rub=200,
+        package_amount=1000,
+        package_unit="g",
+        package_basis="Единица продажи MCP: кг",
+    )
+    legacy = sku.model_dump(exclude={"sale_unit"})
+    async with store.connection() as db:
+        await db.execute(
+            "INSERT INTO sku_cache VALUES(?,?,?)",
+            (hashlib.sha256("mcp-v1:Овсянка".encode()).hexdigest(), json.dumps([legacy]), time.time()),
+        )
+        await db.commit()
+
+    class Check(Selector):
+        async def generate(self, prompt, schema, payload, usage, effort="low"):
+            quote = payload["candidates"]["oats"][0]["purchase"]
+            assert quote == {"quantity": 0.15, "covered_amount": 150, "cost_rub": 30}
+            return await super().generate(prompt, schema, payload, usage, effort)
+
+    gateway = Products()
+    shopper = Shopper(store, catalog, gateway, Check())
+    source = RecipesSource.model_validate({"type": "recipes", "items": [{"recipe_id": "r1", "servings": 3}]})
+    result = await shopper.run(
+        "u", "weighted", source, CartLimits(budget_rub=30), PersonContext(), RunUsage()
+    )
+    assert result.data["items"][0]["packages"] == 0.15
+    assert result.data["items"][0]["product"]["price_source"] == "Кэш поиска MCP ВкусВилла"
+    assert result.data["items"][0]["product"]["price_observed_at"] is not None
+    assert result.data["subtotal_rub"] == 30
+    assert gateway.links == [{"sku1": 0.15}]
+    assert not gateway.queries
+    assert result == await shopper.run(
+        "u", "weighted", source, CartLimits(budget_rub=30), PersonContext(), RunUsage()
+    )
+    assert len(gateway.links) == 1
+
+
+async def test_fractional_direct_quantity_requires_confirmed_sale_unit(store, catalog):
+    from app.models import SkuAmount, SkusSource
+
+    gateway = Products()
+    shopper = Shopper(store, catalog, gateway, Selector())
+    source = SkusSource(type="skus", items=[SkuAmount(sku_id="sku1", packages=0.25)])
+    args = ("u", "fractional", source, CartLimits(budget_rub=None), PersonContext(), RunUsage())
+    assert (await shopper.run(*args)).error.code == "INVALID_CART_QUANTITY"
+    await store.cache_skus([Product(sku_id="sku1", title="Пачка", price_rub=100)])
+    assert (await shopper.run(*args)).error.code == "INVALID_CART_QUANTITY"
+    await store.cache_skus([Product(sku_id="sku1", title="На вес", price_rub=100, sale_unit="kg")])
+    result = await shopper.run(*args)
+    assert result.data["subtotal_rub"] == 25
+    assert gateway.links == [{"sku1": 0.25}]
+
+
+def test_explicit_conversion_quotes_edible_amount_and_rounds_packages(product):
+    from app.models import UnitConversion
+    from app.shopping import purchase_quote
+
+    estimate = UnitConversion(factor=50, source_url="https://example.org/eggs", note="Оценка съедобной части")
+    sku = Product(sku_id="7", title="Яйца 10 шт", price_rub=120, package_amount=10, package_unit="pcs")
+    assert purchase_quote(501, "g", sku) is None
+    assert purchase_quote(501, "g", sku, estimate) == {
+        "quantity": 2,
+        "covered_amount": 1000,
+        "cost_rub": 240,
+    }
+    oil = sku.model_copy(update={"package_amount": 1000, "package_unit": "ml"})
+    density = estimate.model_copy(update={"factor": 0.96})
+    assert purchase_quote(960, "g", oil, density)["quantity"] == 1
+    assert purchase_quote(960.1, "g", oil, density)["quantity"] == 2
+    normalized = product.model_copy(update={"conversions": {"pcs": estimate}})
+    payload, _, quantities = Shopper.assemble(
+        [CartProduct(product_id=product.product_id, amount=501, recipe_ids=["r1"])],
+        {product.product_id: normalized},
+        {product.product_id: sku},
+        [],
+        {},
+        CartLimits(budget_rub=None),
+    )
+    assert quantities == {"7": 2}
+    assert payload["items"][0]["quantity_basis"]["source_url"] == estimate.source_url
+
+
+async def test_candidates_supplement_live_search_and_keep_live_price(store, catalog, product):
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(catalog.sources_path)) as db:
+        db.execute("INSERT INTO metadata VALUES('snapshot_date','2026-10-17')")
+        for sku in [7, 8]:
+            db.execute(
+                "INSERT INTO catalog_skus VALUES(?,?)",
+                (
+                    str(sku),
+                    json.dumps(
+                        {
+                            "id": sku,
+                            "name": "Овсянка 500 г",
+                            "unit": "шт",
+                            "price": {"current": 100, "currency": "RUB"},
+                        }
+                    ),
+                ),
+            )
+        db.commit()
+    with closing(sqlite3.connect(catalog.products_path)) as db:
+        db.executemany("INSERT INTO product_skus VALUES(?,?)", [(product.product_id, str(s)) for s in [7, 8]])
+        db.commit()
+
+    class Live(Products):
+        async def search(self, query, limit):
+            self.queries.append(query)
+            return [
+                Product(
+                    sku_id="7", title="Овсянка 500 г", price_rub=123, package_amount=500, package_unit="g"
+                )
+            ]
+
+    service = Live()
+    shopper = Shopper(store, catalog, service, None)
+    for _ in range(2):
+        result = await shopper.candidates(product)
+        assert [(s.sku_id, s.price_rub) for s in result] == [("7", 123), ("8", 100)]
+        assert result[1].price_observed_at == "2026-10-17"
+    assert len(service.queries) == 1

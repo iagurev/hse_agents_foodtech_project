@@ -1,0 +1,13 @@
+**/.env
+**/.env.*
+**/.venv
+**/node_modules
+**/dist
+**/__pycache__
+.git
+.impeccable
+.pytest_cache
+.ruff_cache
+data
+docs
+tests

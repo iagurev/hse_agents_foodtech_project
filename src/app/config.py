@@ -12,8 +12,9 @@ class Config(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
     openrouter_api_key: SecretStr | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_provider: str = "OpenInference"
-    model: str = "z-ai/glm-5.3-flash"
+    openrouter_provider: str = "openai"
+    model: str = "openai/gpt-6-luna"
+    reasoning_effort: Literal["low", "medium"] = "medium"
     planning_model: str = "openai/gpt-6-luna"
     planning_provider: str = "openai"
     planning_reasoning_effort: Literal["low", "medium", "high"] = "medium"
@@ -27,8 +28,6 @@ class Config(BaseSettings):
     retrieval_model_cache_path: Path = Path("../hse_agents_runtime/retrieval-model")
     retrieval_timeout_seconds: float = Field(default=2.8, gt=0, le=30)
     retrieval_threads: int = Field(default=2, ge=1, le=16)
-    planning_candidate_strategy: Literal["retrieval", "full_catalog"] = "retrieval"
-    planning_candidate_count: int = Field(default=120, ge=20, le=500)
     vkusvill_mcp_url: str = "https://mcp.vkusvill.ru/mcp"
     request_limit: int = Field(default=12, ge=1)
     turn_timeout_seconds: float = Field(default=600, gt=0)
@@ -41,14 +40,29 @@ class Config(BaseSettings):
     compaction_timeout_seconds: float = Field(default=180, gt=0)
     compaction_request_limit: int = Field(default=2, ge=1, le=2)
     tokenizer_cache_path: Path = Path("../hse_agents_runtime/tokenizer")
-    guard_model: str = "openai/gpt-oss-safeguard-20b"
+    guard_model: str = "google/gemini-2.5-flash-lite"
     guard_timeout_seconds: float = Field(default=60, gt=0)
     integration_timeout_seconds: float = Field(default=60, gt=0)
+    image_timeout_seconds: float = Field(default=20, gt=0)
+    image_max_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
+    image_cache_seconds: int = Field(default=86400, gt=0)
     session_days: int = Field(default=30, gt=0)
     web_host: str = "127.0.0.1"
     web_port: int = 8080
     frontend_path: Path = Path("frontend/dist")
     log_level: str = "INFO"
+    langfuse_enabled: bool = False
+    langfuse_base_url: str = "http://127.0.0.1:3001"
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: SecretStr | None = None
+    langfuse_environment: str = "local"
+
+    @model_validator(mode="after")
+    def validate_tracing(self) -> "Config":
+        """Требует ключи только для явно включённого экспорта."""
+        if self.langfuse_enabled and not (self.langfuse_public_key and self.langfuse_secret_key):
+            raise ValueError("Для Langfuse задайте LANGFUSE_PUBLIC_KEY и LANGFUSE_SECRET_KEY")
+        return self
 
     @property
     def max_input_tokens(self) -> int:

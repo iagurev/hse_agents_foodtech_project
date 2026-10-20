@@ -205,7 +205,7 @@ async def test_new_sku_from_public_tools_is_resolved(store, catalog, operation):
         async def analogs(self, *args):
             return [sku("new", 80.0)]
 
-    ctx = SimpleNamespace(deps=SimpleNamespace(store=store, products=Search()))
+    ctx = SimpleNamespace(deps=SimpleNamespace(store=store, products=Search(), catalog=catalog))
     if operation == "search":
         await search_products(ctx, ProductQuery(query="Овсянка"))
     else:
@@ -359,3 +359,16 @@ def test_revision_rejects_boolean_and_string_day():
         data["meals"][0]["day"] = invalid
         with pytest.raises(ValidationError):
             PlanRevision.model_validate(data)
+
+
+def test_reassembling_unresolved_product_preserves_reason(product):
+    products = [CartProduct(product_id=product.product_id, amount=50, recipe_ids=["r1"])]
+    unresolved = [
+        {"product_id": product.product_id, "recipe_ids": ["r1"], "reason": "Овсянка: Фасовка неизвестна"}
+    ]
+    for _ in range(3):
+        data, _, _ = Shopper.assemble(
+            products, {product.product_id: product}, {}, unresolved, {}, CartLimits(budget_rub=None)
+        )
+        assert data["unresolved"] == unresolved
+        unresolved = data["unresolved"]

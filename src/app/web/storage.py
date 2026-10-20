@@ -45,6 +45,9 @@ class WebStore(Store):
             columns = await (await db.execute("PRAGMA table_info(turns)")).fetchall()
             if "model_visible" not in {r["name"] for r in columns}:
                 await db.execute("ALTER TABLE turns ADD COLUMN model_visible INTEGER NOT NULL DEFAULT 1")
+            columns = await (await db.execute("PRAGMA table_info(web_runs)")).fetchall()
+            if "references_json" not in {r["name"] for r in columns}:
+                await db.execute("ALTER TABLE web_runs ADD COLUMN references_json TEXT NOT NULL DEFAULT '[]'")
             await db.execute(
                 "UPDATE web_runs SET state='interrupted',output=? WHERE state IN ('queued','guarding','running')",
                 ("Выполнение прервано перезапуском приложения. Сохранённые результаты доступны.",),
@@ -190,8 +193,8 @@ class WebStore(Store):
                         WHERE user_id=? AND kind=? AND parent_id IS NULL
                         UNION ALL SELECT o.object_id,v.root_id,o.rowid,o.payload FROM objects o
                         JOIN versions v ON o.parent_id=v.object_id
-                    ) SELECT payload FROM versions
-                    WHERE sequence IN (SELECT MAX(sequence) FROM versions GROUP BY root_id)
+                    ) SELECT payload FROM versions JOIN object_meta USING(root_id)
+                    WHERE hidden=0 AND sequence IN (SELECT MAX(sequence) FROM versions GROUP BY root_id)
                     ORDER BY sequence DESC""",
                     (user_id, kind),
                 )

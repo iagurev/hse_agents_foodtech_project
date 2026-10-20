@@ -52,6 +52,11 @@ class Store:
                 CREATE TABLE IF NOT EXISTS purchased(
                   object_id TEXT NOT NULL, sku_id TEXT NOT NULL, PRIMARY KEY(object_id,sku_id));
                 CREATE INDEX IF NOT EXISTS object_parent ON objects(parent_id);
+                CREATE TABLE IF NOT EXISTS object_meta(
+                  root_id TEXT PRIMARY KEY REFERENCES objects(object_id),
+                  title TEXT, hidden INTEGER NOT NULL DEFAULT 0, created_at REAL);
+                INSERT OR IGNORE INTO object_meta(root_id)
+                  SELECT object_id FROM objects WHERE parent_id IS NULL;
                 CREATE TABLE IF NOT EXISTS operations(
                   user_id TEXT NOT NULL, operation_id TEXT NOT NULL, result TEXT NOT NULL,
                   PRIMARY KEY(user_id,operation_id));
@@ -281,6 +286,10 @@ class Store:
                 "INSERT INTO objects VALUES(?,?,?,?,?,?)",
                 (object_id, user_id, kind, parent_id, result.model_dump_json(), result.status),
             )
+            if parent_id is None:
+                await db.execute(
+                    "INSERT INTO object_meta(root_id,created_at) VALUES(?,?)", (object_id, time.time())
+                )
             if kind == "cart" and parent_id:
                 old_items = json.loads(parent["payload"])["data"].get("items", [])
                 old_quantities = {}
@@ -324,7 +333,7 @@ class Store:
         )
 
     async def list_objects(self, user_id: str, kind: str) -> Result:
-        """Возвращает метаданные всех версий без скрытого усечения.
+        """Возвращает метаданные нескрытых версий без усечения.
 
         :param user_id: Владелец
         :param kind: Тип объекта
@@ -337,12 +346,72 @@ class Store:
                     (user_id, kind),
                 )
             ).fetchall()
+        metadata = await self.object_metadata(user_id)
         return Result(
             data=[
                 {f"{kind}_id": r["object_id"], "parent_id": r["parent_id"], "status": r["status"]}
                 for r in rows
+                if not metadata[r["object_id"]]["hidden"]
             ]
         )
+
+    async def object_metadata(self, user_id: str) -> dict[str, dict]:
+        """Разрешает корни версий и их общие метаданные одним запросом.
+
+        :param user_id: Владелец объектов
+        :return: Метаданные по ID версии; root_data содержит исходный объект для названия
+        """
+        async with self.connection() as db:
+            rows = await (
+                await db.execute(
+                    """WITH RECURSIVE versions AS (
+                    SELECT object_id,object_id AS root_id FROM objects
+                    WHERE user_id=? AND parent_id IS NULL
+                    UNION ALL SELECT o.object_id,v.root_id FROM objects o
+                    JOIN versions v ON o.parent_id=v.object_id WHERE o.user_id=?
+                ) SELECT v.object_id,v.root_id,m.title,m.hidden,m.created_at,o.payload,version.rowid AS sequence
+                FROM versions v JOIN object_meta m ON m.root_id=v.root_id
+                JOIN objects o ON o.object_id=v.root_id JOIN objects version ON version.object_id=v.object_id""",
+                    (user_id, user_id),
+                )
+            ).fetchall()
+        roots = {}
+        result = {}
+        for row in rows:
+            root = row["root_id"]
+            if root not in roots:
+                roots[root] = {key: row[key] for key in ("root_id", "title", "hidden", "created_at")}
+                roots[root]["root_data"] = json.loads(row["payload"])["data"]
+            result[row["object_id"]] = roots[root] | {"sequence": row["sequence"]}
+        return result
+
+    async def set_object_metadata(
+        self, user_id: str, kind: str, object_id: str, *, title: str | None = None, hide: bool = False
+    ) -> bool:
+        """Меняет только метаданные цепочки с проверкой владельца и типа.
+
+        :param user_id: Владелец
+        :param kind: plan или cart
+        :param object_id: Любая версия
+        :param title: Новое проверенное название либо отсутствие изменения
+        :param hide: Скрыть цепочку; повтор не меняет результат
+        :return: Найден ли принадлежащий пользователю объект
+        """
+        async with self.connection() as db:
+            cursor = await db.execute(
+                """WITH RECURSIVE ancestors AS (
+                    SELECT object_id,parent_id FROM objects WHERE object_id=? AND user_id=? AND kind=?
+                    UNION ALL SELECT o.object_id,o.parent_id FROM objects o
+                    JOIN ancestors a ON o.object_id=a.parent_id
+                ) UPDATE object_meta SET title=COALESCE(?,title),hidden=MAX(hidden,?)
+                WHERE root_id IN (SELECT object_id FROM ancestors WHERE parent_id IS NULL)
+                RETURNING root_id""",
+                (object_id, user_id, kind, title, int(hide)),
+            )
+            found = await cursor.fetchone()
+            await cursor.close()
+            await db.commit()
+        return found is not None
 
     async def history(self, chat_id: str) -> tuple[str, int, list[dict[str, JsonValue]]]:
         """Читает сводку и несжатый хвост целыми ходами.

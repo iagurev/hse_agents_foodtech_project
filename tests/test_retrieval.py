@@ -8,11 +8,16 @@ from pydantic_ai.usage import RunUsage
 
 from app.assistant.tools import RecipeSearchResult
 from app.config import Config
-from app.models import PersonContext, PlanLimits
+from app.models import PersonContext, PlanLimits, RecipeSearchLimits
 from app.planning import Planner
 from app.retrieval.features import equipment_features
-from app.retrieval.models import SearchConstraints
 from app.retrieval.service import RecipeRetriever
+
+
+def limits(**changes):
+    return RecipeSearchLimits.model_validate(
+        {field: None for field in RecipeSearchLimits.model_fields} | changes
+    )
 
 
 class Encoder:
@@ -67,6 +72,10 @@ async def retrieval(catalog_writer, recipe, product, tmp_path):
                 "steps": steps,
                 "meal_roles": [role],
                 "equipment": [],
+                "difficulty": "advanced" if rid == "alternative" else "easy",
+                "cost": recipe.cost.model_copy(
+                    update={"mean_rub": 21.0 if rid == "apple-cakes" else 21.01 if rid == "garnish" else 20.0}
+                ),
             }
         )
         for rid, title, pid, steps, role in definitions
@@ -84,110 +93,120 @@ async def retrieval(catalog_writer, recipe, product, tmp_path):
         retriever.close()
 
 
-async def test_negation_is_not_a_positive_search_term(retrieval):
+@pytest.mark.parametrize("engine", ["rag", "fts"])
+async def test_explicit_filters_and_search_contract(retrieval, engine):
     retriever, _ = retrieval
-    result = await retriever.search("сырники без творога")
+    search = retriever.search if engine == "rag" else retriever.catalog.search
+    result = await search("сырники", limits(exclude_products=["творога"]))
     ids = [r["recipe_id"] for r in result.data["recipes"]]
-    assert ids[0] == "apple-cakes"
-    assert "quark-cakes" not in ids
-    assert "garnish" not in ids
-    only_exclusion = await retriever.select("без творога")
-    assert only_exclusion.recipe_ids and "quark-cakes" not in only_exclusion.recipe_ids
-    assert not any(d.code == "RETRIEVAL_DEGRADED" for d in only_exclusion.diagnostics)
-    assert RecipeSearchResult.from_result(result).data.recipes[0].title == "Сырники из яблок"
+    assert "apple-cakes" in ids and "quark-cakes" not in ids
+    assert set(result.data) == {"recipes"}
+    assert RecipeSearchResult.from_result(result).data.recipes
+    result = await search("сырники", limits(exclude_products=["quark", "apple"]))
+    assert not result.data["recipes"]
+    result = await search("сырники", limits(exclude_products=["неопределённый ингредиент"]))
+    assert not result.data["recipes"]
+    assert not (await search("сырники", limits(forbidden_equipment=["неизвестная техника"]))).data["recipes"]
 
 
-async def test_profile_current_memory_and_explicit_override(retrieval):
+async def test_query_is_not_parsed_or_rewritten(retrieval, monkeypatch):
     retriever, _ = retrieval
-    person = PersonContext(memory="Не ем творог", dialogue="Раньше обсуждалась аллергия на яйца")
-    selected = await retriever.select("сырники", person)
-    assert "quark-cakes" not in selected.recipe_ids
-    forgotten = await retriever.select("сырники", PersonContext(dialogue=person.dialogue))
-    assert "quark-cakes" in forgotten.recipe_ids
-    override = await retriever.select("сырники", person, SearchConstraints(exclude_products=[]))
-    assert "quark-cakes" in override.recipe_ids
-    partial = await retriever.select("сырники", person, SearchConstraints(max_total_minutes=100))
-    assert "quark-cakes" not in partial.recipe_ids
-    preferred = await retriever.select("сырники", PersonContext(memory="Предпочитаю яблоки."))
-    assert preferred.recipe_ids[0] == "apple-cakes"
-    assert not retriever.conditions.preferences(PersonContext(memory="Не люблю яблоки."))
-    _, conditions, _ = retriever.conditions.resolve(
-        "сырники",
-        PersonContext(questionnaire={"cooking_difficulty": "easy"}),
-        SearchConstraints(max_difficulty=None),
-    )
-    assert conditions.max_difficulty is None
+    seen = []
+
+    async def rank(query, allowed, diagnostics, deadline):
+        seen.append((query, allowed))
+        return sorted(allowed)
+
+    monkeypatch.setattr(retriever, "_rank", rank)
+    queries = [
+        "салат без помидоров с курицей",
+        "омлет без духовки с грибами",
+        "веганский ужин до двадцати минут",
+        "сырники, аллергия на орехи",
+    ]
+    for query in queries:
+        await retriever.select(query, limits())
+    assert [query for query, _ in seen] == queries[1:]
+    assert seen[0][1] == {"omelet", "alternative"}
+    assert seen[1][1] == set(retriever.recipes)
+    assert seen[2][1] == {"quark-cakes", "apple-cakes"}
 
 
 async def test_equipment_alternatives_and_unknown_are_conservative(retrieval):
     retriever, _ = retrieval
-    selected = await retriever.select("омлет без духовки")
+    selected = await retriever.select("омлет", limits(forbidden_equipment=["духовка"]))
     assert "omelet" not in selected.recipe_ids
     assert "alternative" in selected.recipe_ids
     assert "uncertain" not in selected.recipe_ids
-    both = await retriever.select(
-        "омлет", constraints=SearchConstraints(forbidden_equipment=["духовка", "аэрогриль"])
-    )
+    both = await retriever.select("омлет", limits(forbidden_equipment=["духовка", "аэрогриль"]))
     assert "alternative" not in both.recipe_ids
-    assert any(d.code == "INSUFFICIENT_EVIDENCE" for d in selected.diagnostics)
+    assert "INSUFFICIENT_EVIDENCE" in selected.diagnostics
 
 
-async def test_unresolved_allergen_and_unknown_product_do_not_claim_safety(retrieval):
+@pytest.mark.parametrize("engine", ["rag", "fts"])
+async def test_time_roles_difficulty_and_diet(retrieval, engine):
     retriever, _ = retrieval
-    for constraints in [
-        SearchConstraints(allergens=["орехи"]),
-        SearchConstraints(exclude_products=["несуществующий порошок"]),
-    ]:
-        result = await retriever.select("сырники", constraints=constraints)
-        assert result.recipe_ids == []
-        assert result.diagnostics
-    result = await retriever.select("сырники без неопределенного ингредиента")
-    assert result.recipe_ids == []
-    gluten = await retriever.select("сырники без глютена")
-    assert not gluten.recipe_ids and any(d.code == "INSUFFICIENT_EVIDENCE" for d in gluten.diagnostics)
-    no_allergy = await retriever.select("сырники", PersonContext(memory="Аллергий нет."))
-    assert no_allergy.recipe_ids
-    mixed = await retriever.select(
-        "сырники", PersonContext(memory="Непереносимости нет, но аллергия на орехи.")
-    )
-    assert not mixed.recipe_ids
+    search = retriever.search if engine == "rag" else retriever.catalog.search
+    assert not (await search("омлет", limits(max_total_minutes=1))).data["recipes"]
+    result = await search("омлет", limits(meal_roles=["dinner"], max_difficulty="easy"))
+    assert result.data["recipes"]
+    assert all("dinner" in r["meal_roles"] and r["difficulty"] == "easy" for r in result.data["recipes"])
+    assert not (await search("омлет", limits(meal_roles=["breakfast"]))).data["recipes"]
+    result = await search("сырники", limits(diet="vegetarian"))
+    assert "quark-cakes" in {r["recipe_id"] for r in result.data["recipes"]}
+    result = await search("сырники", limits(diet="vegan"))
+    assert "quark-cakes" not in {r["recipe_id"] for r in result.data["recipes"]}
 
 
-async def test_coordinated_product_exclusions_are_all_applied(retrieval):
+@pytest.mark.parametrize("engine", ["rag", "fts"])
+@pytest.mark.parametrize("budget,expected", [(20, {"quark-cakes", "apple-cakes"}), (0, set())])
+async def test_budget_of_base_serving_with_five_percent_tolerance(retrieval, engine, budget, expected):
     retriever, _ = retrieval
-    for query in ["сырники без творога и без яблок", "сырники без творога, яблок"]:
-        result = await retriever.select(query)
-        assert not result.recipe_ids
+    search = retriever.search if engine == "rag" else retriever.catalog.search
+    result = await search("сырники", limits(budget_rub=budget))
+    assert {r["recipe_id"] for r in result.data["recipes"]} == expected
 
 
-async def test_supported_time_and_roles_filter_before_top_k(retrieval):
-    retriever, _ = retrieval
-    result = await retriever.select("ужин", constraints=SearchConstraints(max_total_minutes=0.1))
-    assert not result.recipe_ids
-    result = await retriever.select("ужин")
-    assert result.recipe_ids
-    assert all("dinner" in retriever.recipes[rid].meal_roles for rid in result.recipe_ids)
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("budget_rub", -1),
+        ("budget_rub", "100"),
+        ("budget_rub", True),
+        ("budget_rub", float("inf")),
+        ("max_total_minutes", 0),
+        ("max_total_minutes", float("nan")),
+        ("max_difficulty", "expert"),
+        ("diet", "some diet"),
+        ("meal_roles", ["any"]),
+    ],
+)
+def test_search_limits_validate_numbers_and_values(field, value):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        limits(**{field: value})
 
 
 async def test_timeout_keeps_cpu_slot_until_actual_completion(retrieval):
     retriever, encoder = retrieval
     encoder.wait = threading.Event()
     calls = encoder.calls
-    first = await retriever.select("сырники")
-    second = await retriever.select("сырники")
+    first = await retriever.select("сырники", limits())
+    second = await retriever.select("сырники", limits())
     assert encoder.calls == calls + 1
     assert first.recipe_ids and second.recipe_ids
-    assert all(any(d.code == "RETRIEVAL_DEGRADED" for d in r.diagnostics) for r in [first, second])
+    assert all("RETRIEVAL_DEGRADED" in r.diagnostics for r in [first, second])
     encoder.wait.set()
     await asyncio.shield(retriever.busy)
-    await retriever.select("сырники")
+    await retriever.select("сырники", limits())
     assert encoder.calls == calls + 2
 
 
 async def test_cancelled_request_does_not_release_running_worker(retrieval):
     retriever, encoder = retrieval
     encoder.wait = threading.Event()
-    task = asyncio.create_task(retriever.select("сырники"))
+    task = asyncio.create_task(retriever.select("сырники", limits()))
     for _ in range(100):
         if retriever.busy:
             break
@@ -197,7 +216,7 @@ async def test_cancelled_request_does_not_release_running_worker(retrieval):
     with pytest.raises(asyncio.CancelledError):
         await task
     before = encoder.calls
-    await retriever.select("сырники")
+    await retriever.select("сырники", limits())
     assert encoder.calls == before
     encoder.wait.set()
     await asyncio.shield(retriever.busy)
@@ -221,17 +240,9 @@ async def test_stale_or_corrupted_index_rebuilt_and_catalog_readonly(retrieval):
             "UPDATE recipes SET payload=json_set(payload,'$.title','Новое блюдо') WHERE recipe_id='omelet'"
         )
     old_id = retriever.index_id
-    assert not (await retriever.select("омлет")).recipe_ids
+    assert not (await retriever.select("омлет", limits())).recipe_ids
     await retriever.prepare(load_model=False)
     assert old_id != retriever.index_id
-
-
-async def test_no_unrelated_substitution_when_named_dish_has_no_matches(retrieval):
-    retriever, _ = retrieval
-    result = await retriever.select(
-        "сырники", constraints=SearchConstraints(exclude_products=["творог", "яблоко"])
-    )
-    assert result.recipe_ids == []
 
 
 async def test_web_without_api_key_still_serves_local_search(retrieval, store, monkeypatch):
@@ -275,12 +286,14 @@ async def test_web_without_api_key_still_serves_local_search(retrieval, store, m
                 f"/api/chats/{chat['chat_id']}/turns", json={"turn_id": "no-key", "text": "Привет"}
             )
             assert response.status_code == 503 and "OPENROUTER_API_KEY" in response.json()["detail"]
-            assert (await client.post("/api/recipes/search", json={"query": "сырники"})).json()["data"][
-                "recipes"
-            ]
+            assert (
+                await client.post(
+                    "/api/recipes/search", json={"query": "сырники", "limits": limits().model_dump()}
+                )
+            ).json()["data"]["recipes"]
 
 
-async def test_plan_candidates_integrated_without_catalog_leaking(retrieval, store):
+async def test_planner_receives_full_catalog_with_short_ids_and_no_retrieval(retrieval, store):
     from app.models import Meal, PlanDraft
 
     retriever, _ = retrieval
@@ -288,7 +301,10 @@ async def test_plan_candidates_integrated_without_catalog_leaking(retrieval, sto
     class Generator:
         async def generate(self, prompt, schema, payload, usage, effort):
             self.payload = payload
-            assert all("breakfast" in r["meal_roles"] for r in payload["catalog"])
+            assert len(payload["catalog"]) == len(retriever.recipes)
+            assert {r["recipe_id"] for r in payload["catalog"]} == {
+                f"r{i}" for i in range(1, len(retriever.recipes) + 1)
+            }
             return PlanDraft(
                 meals=[
                     Meal(day=1, meal="breakfast", recipe_id=payload["catalog"][0]["recipe_id"], servings=1.0)
@@ -297,7 +313,7 @@ async def test_plan_candidates_integrated_without_catalog_leaking(retrieval, sto
             )
 
     generator = Generator()
-    planner = Planner(store, retriever.catalog, generator, retriever)
+    planner = Planner(store, retriever.catalog, generator)
     result = await planner.run(
         "u",
         "rag-plan",
@@ -308,20 +324,9 @@ async def test_plan_candidates_integrated_without_catalog_leaking(retrieval, sto
         RunUsage(),
     )
     assert result.status == "ok"
-    assert result.data["meals"][0]["recipe_id"] == "apple-cakes"
+    assert result.data["meals"][0]["recipe_id"] in retriever.recipes
     assert "catalog" not in result.data
-    assert "retrieval_diagnostics" in generator.payload
-    empty = await planner.run(
-        "u",
-        "allergy",
-        "завтрак",
-        1,
-        PlanLimits(max_difficulty=None, budget_rub=None),
-        PersonContext(),
-        RunUsage(),
-        constraints=SearchConstraints(allergens=["молоко"]),
-    )
-    assert empty.error.code == "NO_SUITABLE_RECIPES"
+    assert "retrieval_diagnostics" not in generator.payload
 
 
 def test_grill_ready_ingredient_is_not_a_required_grill(recipe):
@@ -329,7 +334,7 @@ def test_grill_ready_ingredient_is_not_a_required_grill(recipe):
     assert equipment_features(r)["groups"] == []
 
 
-async def test_web_native_search_uses_real_context_without_llm(retrieval, store):
+async def test_web_search_does_not_inherit_profile_and_needs_no_llm(retrieval, store):
     from types import SimpleNamespace
 
     import httpx
@@ -348,7 +353,11 @@ async def test_web_native_search_uses_real_context_without_llm(retrieval, store)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            assert (await client.post("/api/recipes/search", json={"query": "сырники"})).status_code == 401
+            assert (
+                await client.post(
+                    "/api/recipes/search", json={"query": "сырники", "limits": limits().model_dump()}
+                )
+            ).status_code == 401
             response = await client.post(
                 "/api/auth/register",
                 json={
@@ -365,7 +374,51 @@ async def test_web_native_search_uses_real_context_without_llm(retrieval, store)
                 },
             )
             assert response.status_code == 200
-            result = await client.post("/api/recipes/search", json={"query": "сырники"})
+            for invalid in [
+                {"query": "сырники"},
+                {"query": "сырники", "limits": {}},
+                {"query": "сырники", "limits": None},
+            ]:
+                assert (await client.post("/api/recipes/search", json=invalid)).status_code == 422
+            filtered = await client.post(
+                "/api/recipes/search",
+                json={"query": "сырники", "limits": limits(exclude_products=["quark"]).model_dump()},
+            )
+            assert "quark-cakes" not in [r["recipe_id"] for r in filtered.json()["data"]["recipes"]]
+            result = await client.post(
+                "/api/recipes/search", json={"query": "сырники", "limits": limits().model_dump()}
+            )
             assert result.status_code == 200
-            assert "quark-cakes" not in [r["recipe_id"] for r in result.json()["data"]["recipes"]]
+            assert "quark-cakes" in [r["recipe_id"] for r in result.json()["data"]["recipes"]]
+            assert set(result.json()["data"]) == {"recipes"}
             assert (await client.get("/api/health")).json()["retrieval"]["enabled"] is True
+
+
+async def test_filters_run_before_top_ten_in_both_engines(catalog_writer, recipe, product, tmp_path):
+    recipes = [
+        recipe.model_copy(
+            update={
+                "recipe_id": f"r{i:02}",
+                "cost": recipe.cost.model_copy(update={"mean_rub": 200 if i < 12 else 20}),
+            }
+        )
+        for i in range(15)
+    ]
+    catalog = catalog_writer([product], recipes)
+    retriever = RecipeRetriever(catalog, Config(_env_file=None, retrieval_cache_path=tmp_path / "index"))
+    await retriever.prepare(load_model=False)
+    try:
+        for search in [retriever.search, catalog.search]:
+            result = await search("каша", limits(budget_rub=20))
+            assert {r["recipe_id"] for r in result.data["recipes"]} == {"r12", "r13", "r14"}
+            assert len((await search("каша", limits())).data["recipes"]) == 10
+    finally:
+        retriever.close()
+
+
+async def test_named_dish_does_not_become_a_garnish(retrieval):
+    retriever, _ = retrieval
+    result = await retriever.select("сырники", limits(exclude_products=["quark", "apple"]))
+    assert not result.recipe_ids
+    result = await retriever.select("сырники", limits())
+    assert set(result.recipe_ids) == {"quark-cakes", "apple-cakes"}

@@ -7,8 +7,7 @@ from pathlib import Path
 
 from app.catalog import Catalog
 from app.config import get_config
-from app.models import PersonContext
-from app.retrieval.models import SearchConstraints
+from app.models import RecipeSearchLimits
 from app.retrieval.service import RecipeRetriever
 
 
@@ -41,42 +40,40 @@ async def execute(args: argparse.Namespace) -> None:
                 )
             )
         elif args.command == "search":
-            person = (
-                PersonContext.model_validate_json(Path(args.person_file).read_text())
-                if args.person_file
-                else PersonContext()
-            )
-            constraints = (
-                SearchConstraints.model_validate_json(args.constraints) if args.constraints else None
-            )
-            result = await retriever.search(args.query, person, constraints)
+            limits = RecipeSearchLimits.model_validate_json(args.limits)
+            result = await retriever.search(args.query, limits)
             print(result.model_dump_json(indent=2))
         else:
+            unlimited = RecipeSearchLimits(**{field: None for field in RecipeSearchLimits.model_fields})
             queries = [
                 "омлет",
-                "сырники без творога",
-                "ужин без духовки",
+                "сырники",
+                "омлет",
                 "салат с курицей",
                 "быстрый завтрак",
                 "суп из чечевицы",
                 "овощной ужин",
                 "паста с грибами",
             ]
+            limits = [unlimited for _ in queries]
+            limits[1] = unlimited.model_copy(update={"exclude_products": ["творог"]})
+            limits[2] = unlimited.model_copy(update={"forbidden_equipment": ["духовка"]})
             times, cases = [], []
             for _ in range(args.repeats):
-                for query in queries:
+                for query, conditions in zip(queries, limits, strict=True):
                     before = time.monotonic()
-                    result = await retriever.search(query)
+                    result = await retriever.select(query, conditions)
                     times.append((time.monotonic() - before) * 1000)
                     cases.append(
                         {
                             "query": query,
-                            "ids": [r["recipe_id"] for r in result.data["recipes"]],
-                            "diagnostics": result.data["diagnostics"],
+                            "ids": result.recipe_ids,
+                            "limits": conditions.model_dump(),
+                            "diagnostics": result.diagnostics,
                         }
                     )
             concurrent_started = time.monotonic()
-            pair = await asyncio.gather(*(retriever.search(q) for q in [queries[0], queries[3]]))
+            pair = await asyncio.gather(*(retriever.select(q, unlimited) for q in [queries[0], queries[3]]))
             report = {
                 "index_id": retriever.index_id,
                 "dense": retriever.matrix is not None,
@@ -86,9 +83,7 @@ async def execute(args: argparse.Namespace) -> None:
                 "p95_ms": round(sorted(times)[min(len(times) - 1, int(len(times) * 0.95))], 2),
                 "max_ms": round(max(times), 2),
                 "concurrent_pair_ms": round((time.monotonic() - concurrent_started) * 1000, 2),
-                "concurrent_degraded": sum(
-                    any(d["code"] == "RETRIEVAL_DEGRADED" for d in r.data["diagnostics"]) for r in pair
-                ),
+                "concurrent_degraded": sum("RETRIEVAL_DEGRADED" in r.diagnostics for r in pair),
                 "cases": cases[: len(queries)],
             }
             value = json.dumps(report, ensure_ascii=False, indent=2)
@@ -107,8 +102,11 @@ def main() -> None:
     sub.add_parser("prepare")
     search = sub.add_parser("search")
     search.add_argument("query")
-    search.add_argument("--constraints", help="SearchConstraints в JSON")
-    search.add_argument("--person-file", help="JSON PersonContext")
+    search.add_argument(
+        "--limits",
+        default=json.dumps({field: None for field in RecipeSearchLimits.model_fields}),
+        help="JSON со всеми полями RecipeSearchLimits; без флага CLI явно передаёт все null",
+    )
     benchmark = sub.add_parser("benchmark")
     benchmark.add_argument("--repeats", type=int, choices=range(1, 21), default=3)
     benchmark.add_argument("--output")

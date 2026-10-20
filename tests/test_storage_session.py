@@ -246,3 +246,49 @@ async def test_cancel_preserves_visible_stream_without_duplicate_tool_text(store
     returns = [p.tool_call_id for m in messages for p in m.parts if isinstance(p, ToolReturnPart)]
     assert calls == returns == ["read"]
     assert (await session.run("u", "c", "Планы", "partial"))["replayed"]
+
+
+async def test_plan_progress_uses_tool_call_id_without_entering_model_history(store, catalog, counter):
+    from pydantic_ai.models.function import DeltaToolCall
+
+    from app.models import Meal, PlanDraft
+
+    async def stream(messages, info):
+        if not any(isinstance(p, ToolReturnPart) for m in messages for p in m.parts):
+            yield {
+                0: DeltaToolCall(
+                    name="generate_plan",
+                    json_args='{"request":"Меню", "days":1, "limits":{"budget_rub":null,"max_difficulty":null}}',
+                    tool_call_id="menu-progress",
+                )
+            }
+        else:
+            yield "Готово."
+
+    class Generator(SummaryGenerator):
+        async def generate(self, *args, **kwargs):
+            return PlanDraft(
+                meals=[Meal(day=1, meal="breakfast", recipe_id="r1", servings=1)], explanation=""
+            )
+
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    session = Session(
+        Config(_env_file=None),
+        build_agent(FunctionModel(stream_function=stream)),
+        store,
+        catalog,
+        NoProducts(),
+        Generator(),
+        counter=counter,
+    )
+    result = await session.run("u", "c", "Меню", emit=emit)
+    assert result["error"] is None
+    stages = [e for e in events if e["type"] == "progress"]
+    assert [e["stage"] for e in stages] == ["plan_prepare", "plan_generate", "plan_check", "plan_save"]
+    assert all(e["call_id"] == "menu-progress" and e["name"] == "generate_plan" for e in stages)
+    _, _, turns = await store.history("c")
+    assert "plan_generate" not in str(turns)

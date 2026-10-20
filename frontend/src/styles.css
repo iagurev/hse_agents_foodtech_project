@@ -58,7 +58,8 @@ a {
   touch-action: manipulation;
 }
 button:focus-visible,
-a:focus-visible {
+a:focus-visible,
+summary:focus-visible {
   outline: 2px solid var(--green);
   outline-offset: 3px;
 }
@@ -376,6 +377,8 @@ input::-webkit-inner-spin-button {
   border-bottom: 1px solid var(--line);
 }
 .page-header h1 {
+  flex: 1;
+  min-width: 0;
   font-size: 16px;
   letter-spacing: -0.02em;
   font-weight: 700;
@@ -490,4 +493,10 @@ input::-webkit-inner-spin-button {
 }
 .plan-explanation p {
   margin: 10px 0 20px;
+}
+.field-error {
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 10px 0 0;
 }

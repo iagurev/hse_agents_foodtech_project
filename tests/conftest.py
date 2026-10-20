@@ -1,12 +1,13 @@
 import json
 import sqlite3
 from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
 from app.catalog import Catalog
-from app.models import Cost, Ingredient, NormalizedProduct, Nutrition, Recipe
+from app.models import Cost, Ingredient, NormalizedProduct, Nutrition, Recipe, RecipeSearchLimits
 from app.storage import Store
 
 
@@ -58,7 +59,7 @@ def catalog_writer(tmp_path: Path) -> Callable[[list[NormalizedProduct], list[Re
         paths = [tmp_path / f"{kind}.sqlite" for kind in ["recipes", "products", "sources"]]
         for kind, path in zip(["recipes", "products", "sources"], paths, strict=True):
             path.unlink(missing_ok=True)
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db:
                 db.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
                 db.executemany(
                     "INSERT INTO metadata VALUES(?,?)",
@@ -126,6 +127,7 @@ def catalog_writer(tmp_path: Path) -> Callable[[list[NormalizedProduct], list[Re
                         "INSERT INTO recipe_origins VALUES(?,NULL,?)",
                         [(r.recipe_id, r.source_url) for r in recipes],
                     )
+                db.commit()
         return Catalog(*paths)
 
     return write
@@ -171,3 +173,8 @@ class ControlledCounter:
 @pytest.fixture
 def counter():
     return ControlledCounter()
+
+
+@pytest.fixture
+def no_recipe_limits() -> RecipeSearchLimits:
+    return RecipeSearchLimits(**{field: None for field in RecipeSearchLimits.model_fields})

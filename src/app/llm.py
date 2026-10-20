@@ -4,7 +4,7 @@ from typing import Literal, Protocol, TypeVar
 
 from loguru import logger
 from pydantic import BaseModel, JsonValue
-from pydantic_ai import Agent, NativeOutput
+from pydantic_ai import Agent, InstrumentationSettings, NativeOutput
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import Model
@@ -48,7 +48,9 @@ class ModelGateway:
         *,
         planning_model: Model | None = None,
         planning_effort: Literal["low", "medium", "high"] = "medium",
+        instrumentation: InstrumentationSettings | bool = False,
     ) -> None:
+        self.instrumentation = instrumentation
         self.model = model
         self.planning_model = planning_model
         self.planning_effort = planning_effort
@@ -138,6 +140,8 @@ class ModelGateway:
             model, effort = self.planning_model, self.planning_effort
         agent = Agent(
             model,
+            name=f"{prompt}.{'repair' if payload.get('feedback') else 'generate'}",
+            instrument=self.instrumentation,
             instructions=self.prompts[prompt],
             output_type=NativeOutput(schema, strict=True),
             retries=0,
@@ -162,10 +166,12 @@ class ModelGateway:
         """
         agent = Agent(
             self.model,
+            name="compaction",
+            instrument=self.instrumentation,
             instructions=self.prompts["compact"],
             retries=0,
             output_retries=0,
-            model_settings={"openrouter_reasoning": {"effort": "low"}, "max_tokens": max_output_tokens},
+            model_settings={"openrouter_reasoning": {"effort": "medium"}, "max_tokens": max_output_tokens},
         )
         result = await self._run(agent, "compact", payload, usage, UsageLimits(request_limit=request_limit))
         if not result.strip():

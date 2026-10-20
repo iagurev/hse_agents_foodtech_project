@@ -14,12 +14,13 @@ import '@fontsource/manrope/600.css';
 import '@fontsource/manrope/700.css';
 import '@fontsource/manrope/800.css';
 import { api, ApiError, errorText, go } from './api';
-import type { Me } from './api';
+import type { Me, ChatDraft, ObjectReference } from './api';
 import { Auth, Settings } from './Profile';
 import { ChatScreen } from './Chat';
 import { Collections } from './Collections';
 import { CartDetail, PlanDetail, RecipeDetail } from './Details';
 import { ErrorNote, Loading } from './ui';
+import { positiveNumber } from './preview';
 import './styles.css';
 import './forms.css';
 import './chat.css';
@@ -28,7 +29,7 @@ import './objects.css';
 function App() {
   const [me, setMe] = useState<Me | null>();
   const [error, setError] = useState('');
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState<ChatDraft>({ text: '', references: [] });
   const [route, setRoute] = useState(location.hash.slice(1) || '/chat');
   async function load() {
     setError('');
@@ -54,11 +55,15 @@ function App() {
     viewport?.addEventListener('resize', update);
     return () => viewport?.removeEventListener('resize', update);
   }, []);
-  function discuss(text: string) {
-    setDraft(text);
+  function discuss(text: string, references: ObjectReference[] = []) {
+    setDraft({ text, references });
     go('/chat');
   }
-  const [section, id] = route.slice(1).split('/');
+  const [pathname, query] = route.split('?');
+  const params = new URLSearchParams(query);
+  const from = params.get('from');
+  const back = from?.startsWith('/') && !from.startsWith('//') ? from : undefined;
+  const [section, id] = pathname.slice(1).split('/');
   const detail = ['plan', 'cart', 'recipe', 'settings'].includes(section);
   const active =
     section === 'plan' ? 'plans' : section === 'cart' ? 'carts' : section === 'recipe' ? 'recipes' : section;
@@ -94,23 +99,46 @@ function App() {
               </button>
             </header>
           )}
-          <main className={`app-main ${section === 'chat' || !section ? 'chat-main' : ''}`} key={me.user_id}>
+          <main
+            className={`app-main ${section === 'chat' || !section ? 'chat-main' : ''}`}
+            key={me.user_id}
+            onScroll={(event) =>
+              sessionStorage.setItem(`scroll:#${route}`, String(event.currentTarget.scrollTop))
+            }
+          >
             {(section === 'chat' || !section) && (
-              <ChatScreen userId={me.user_id} draft={draft} setDraft={setDraft} />
+              <ChatScreen
+                selectedChat={params.get('chat')}
+                userId={me.user_id}
+                draft={draft}
+                setDraft={setDraft}
+              />
             )}
             {['plans', 'recipes', 'carts'].includes(section) && (
               <Collections kind={section as 'plans' | 'recipes' | 'carts'} discuss={discuss} />
             )}
-            {section === 'plan' && id && <PlanDetail key={id} id={id} discuss={discuss} />}
-            {section === 'recipe' && id && <RecipeDetail key={id} id={id} discuss={discuss} />}
-            {section === 'cart' && id && <CartDetail key={id} id={id} discuss={discuss} />}
+            {section === 'plan' && id && (
+              <PlanDetail key={id} id={id} back={back || '/plans'} discuss={discuss} />
+            )}
+            {section === 'recipe' && id && (
+              <RecipeDetail
+                key={id}
+                id={id}
+                back={back || '/recipes'}
+                discuss={discuss}
+                servings={positiveNumber(params.get('servings') || '1') ?? 1}
+              />
+            )}
+            {section === 'cart' && id && (
+              <CartDetail key={id} id={id} back={back || '/carts'} discuss={discuss} />
+            )}
             {section === 'settings' && (
               <Settings
                 me={me}
                 update={setMe}
                 logout={() => {
                   setMe(null);
-                  setDraft('');
+                  setDraft({ text: '', references: [] });
                   go('/chat');
                 }}
               />

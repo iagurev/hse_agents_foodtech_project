@@ -1,6 +1,9 @@
+from collections.abc import Awaitable, Callable
+from functools import wraps
 from inspect import cleandoc
 from typing import ClassVar, Literal, Self, get_type_hints
 
+from opentelemetry.trace import get_current_span
 from pydantic import Field
 from pydantic_ai import RunContext, Tool
 from pydantic_ai.toolsets import FunctionToolset
@@ -18,12 +21,14 @@ from app.models import (
     Nutrition,
     PlanLimits,
     Product,
+    RecipeSearchLimits,
     Record,
     Result,
     StoredCartSource,
+    UnitConversion,
     UnresolvedProduct,
 )
-from app.retrieval.models import SearchConstraints, SearchDiagnostic
+from app.tracing import outcome
 
 # Общие основы контрактов. Description — метаданные, не аргумент инструмента.
 
@@ -85,7 +90,7 @@ class PlanView(PlanSummary):
 
 class ListPlansInput(ToolInput):
     description: ClassVar[str] = """
-        Показывает метаданные всех планов и черновиков пользователя. Используй для выбора ID;
+        Показывает метаданные нескрытых планов и черновиков пользователя. Используй для выбора ID;
         содержимое получает get_plan. Аргументов и пагинации нет. Ничего не изменяет.
     """
 
@@ -95,7 +100,7 @@ class ListPlansInput(ToolInput):
 class PlanListResult(ToolResult[list[PlanSummary]]):
     data: list[PlanSummary] | None = Field(
         default=None,
-        description="Метаданные всех планов и черновиков пользователя; пустой список, если их нет",
+        description="Метаданные нескрытых планов и черновиков пользователя; пустой список, если их нет",
     )
 
 
@@ -135,7 +140,7 @@ async def get_plan(ctx: RunContext[Context], args: PlanId) -> PlanResult:
 
 class GeneratePlanInput(ToolInput):
     description: ClassVar[str] = """
-        Создаёт и сохраняет меню по широкому пулу подходящих рецептов. Не требует предварительного
+        Создаёт и сохраняет меню по полному подготовленному каталогу. Не требует предварительного
         search_recipes и не подбирает SKU. Передай условия диалога в request, пределы явно в limits.
         Корзина не создаётся. Включает максимум одну коррекцию, в том числе при ошибке формата.
 
@@ -155,8 +160,7 @@ class GeneratePlanInput(ToolInput):
         Не продолжай составлять тот же план через поиск рецептов и не перезапускай генерацию автоматически.
         Если пользователь запретил менять условия, не предлагай их ослабить.
         Статус error содержит причину в error.message:
-        EMPTY_CATALOG — база пуста, NO_SUITABLE_RECIPES — нет подтверждённого пула по условиям,
-        MODEL_FORMAT — ответ не удалось разобрать после коррекции.
+        EMPTY_CATALOG — база пуста, MODEL_FORMAT — ответ не удалось разобрать после коррекции.
     """
 
     request: str = Field(description="Задача, пожелания и существенные временные условия текущего диалога")
@@ -165,10 +169,6 @@ class GeneratePlanInput(ToolInput):
 
     limits: PlanLimits = Field(
         description="Явные пределы по анкете и диалогу; null в поле снимает предел. Бюджет без прибавки 5%"
-    )
-    constraints: SearchConstraints | None = Field(
-        default=None,
-        description="Действующие условия поиска рецептов по анкете и диалогу; явно передай исключения и недоступную технику, при снятии запрета передай пустой соответствующий список",
     )
 
 
@@ -190,7 +190,7 @@ async def generate_plan(ctx: RunContext[Context], args: GeneratePlanInput) -> Ge
             args.limits,
             d.person,
             ctx.usage,
-            constraints=args.constraints,
+            progress=d.progress("generate_plan", ctx.tool_call_id),
         )
     )
 
@@ -281,10 +281,6 @@ class RecipeDetails(RecipeCard):
 
 class RecipeSearchData(Record):
     recipes: list[RecipeCard] = Field(description="До 10 найденных карточек; пусто, если совпадений нет")
-    diagnostics: list[SearchDiagnostic] = Field(
-        default_factory=list,
-        description="Неизвестные условия, недостаток доказательств, деградация или отсутствие совпадений; передай существенные замечания пользователю",
-    )
 
 
 class RecipeDetailsData(Record):
@@ -298,25 +294,27 @@ class RecipeQuery(ToolInput):
     description: ClassVar[str] = """
         Ищет короткие карточки по одному конкретному блюду, названию или сочетанию продуктов
         в подготовленной базе приложения.
-        Гибридный поиск по смыслу и словам с актуальными анкетой/памятью.
-        Передай действующие исключения продуктов, недоступную технику и прочие поддерживаемые
-        условия через constraints. При явном снятии запрета передай пустой соответствующий список.
-        Свободные условия дополнительно оцени по карточкам; отсутствие аллергена не гарантируется.
-        diagnostics содержит существенные ограничения и деградацию. До 10 карточек, размер фиксирован.
+        В query укажи, что ищем; условия передай отдельно в limits. Например, для «омлета
+        с грибами без духовки» query — «омлет с грибами», forbidden_equipment — ["духовка"].
+        Поиск не извлекает ограничения из текста и сам не читает анкету или память.
+        Передавай только ограничения, заданные в запросе, анкете или памяти; остальные поля — null.
+        Не добавляй ограничения по собственному предположению о блюде.
+        Бюджет относится к одной базовой порции, а не всему плану: backend сравнивает среднюю
+        оценку стоимости с допуском 5%, который не нужно прибавлять или уточнять у пользователя.
+        Соответствие пожеланиям пользователя дополнительно оцени по карточкам;
+        поиск не подтверждает аллергенную безопасность. Возвращает до 10 карточек; размер выдачи фиксирован.
         Не создаёт меню, не загружает рецепты из интернета.
-        Пустой список означает отсутствие подтверждённых кандидатов по текущим условиям.
-        diagnostics поясняет ограничения данных и поиска. Близкие варианты предлагай
+        Пустой список означает, что по запросу в базе ничего не нашлось; достаточно кратко сообщить об этом.
+        Причину отсутствия записей результат не устанавливает. Близкие варианты предлагай
         по возвращённым карточкам, обозначив существенное отличие от запроса.
+        Если рекомендуешь часть найденных блюд, открой выбранные recipe_id через get_recipes:
+        тогда в чате появятся карточки именно твоей подборки, а не всех поисковых кандидатов.
     """
 
-    query: str = Field(
-        min_length=1,
-        max_length=4000,
-        description="Один конкретный запрос: блюдо, название или сочетание ингредиентов",
-    )
-    constraints: SearchConstraints | None = Field(
-        default=None,
-        description="Действующие поддерживаемые условия с учётом временных исключений; null использует актуальные анкету/память и текст query",
+    query: str = Field(description="Блюдо, название или желаемые ингредиенты; ограничения передай в limits")
+
+    limits: RecipeSearchLimits = Field(
+        description="Явные условия поиска; все поля обязательны, null — без ограничения. Backend ничего не наследует"
     )
 
 
@@ -327,12 +325,8 @@ class RecipeSearchResult(ToolResult[RecipeSearchData]):
 
 
 async def search_recipes(ctx: RunContext[Context], args: RecipeQuery) -> RecipeSearchResult:
-    if ctx.deps.retriever is not None:
-        person = await ctx.deps.store.person(ctx.deps.user_id)
-        return RecipeSearchResult.from_result(
-            await ctx.deps.retriever.search(args.query, person, args.constraints)
-        )
-    return RecipeSearchResult.from_result(await ctx.deps.catalog.search(args.query))
+    search = ctx.deps.retriever.search if ctx.deps.retriever is not None else ctx.deps.catalog.search
+    return RecipeSearchResult.from_result(await search(args.query, args.limits))
 
 
 # --- get_recipes ---
@@ -341,6 +335,8 @@ async def search_recipes(ctx: RunContext[Context], args: RecipeQuery) -> RecipeS
 class RecipeIds(ToolInput):
     description: ClassVar[str] = """
         Получает состав с количествами, инструкции и источники нескольких рецептов одним вызовом.
+        Открытые рецепты становятся итоговой подборкой карточек в текущем ответе. Передай все блюда,
+        которые рекомендуешь пользователю; поисковые кандидаты в этом случае отдельно не показываются.
         Используй известные ID из карточек или плана. Неизвестные ID пропускаются; результат содержит только найденные рецепты.
     """
 
@@ -378,7 +374,16 @@ class CartItem(Record):
     product: Product | None = Field(
         description="Достоверная карточка SKU; null, если прямой SKU отсутствует в кэше"
     )
-    packages: int = Field(description="Количество упаковок для ссылки")
+    packages: Number = Field(description="Количество единиц продажи: упаковки либо кг/л для весового SKU")
+    quantity_basis: UnitConversion | None = Field(
+        default=None, description="Справочная оценка перевода единиц с источником; null при прямом расчёте"
+    )
+
+
+class CartLink(Record):
+    sku_ids: list[str] = Field(description="SKU этой части покупки; не более 30 на магазинную ссылку")
+    url: str | None = Field(description="Ссылка части; null при отказе. Заказ не оформлен")
+    error: str | None = Field(description="Ошибка создания именно этой части; null при успехе")
 
 
 class CartView(CartSummary):
@@ -395,7 +400,13 @@ class CartView(CartSummary):
     total_is_complete: bool = Field(
         description="Все позиции подобраны и их цена известна; не подтверждение наличия ссылки"
     )
-    cart_url: str | None = Field(description="Ссылка на эту версию; null, если не создана; заказ не оформлен")
+    cart_url: str | None = Field(
+        description="Единственная ссылка для прежних клиентов; null при нескольких частях или отказе"
+    )
+    cart_links: list[CartLink] = Field(
+        default_factory=list,
+        description="Части одной покупки с общим итогом: ссылки и ошибки по группам SKU; у старых версий пусто, используй cart_url",
+    )
     link_error: str | None = Field(description="Причина отказа создания ссылки, если была попытка")
 
 
@@ -406,14 +417,16 @@ class CreateCartInput(ToolInput):
     description: ClassVar[str] = """
         Создаёт корзину из сохранённого плана, списка рецептов с порциями или готовых SKU.
         Для плана и рецептов сам получает ингредиенты, агрегирует их по product_id, ищет до 10 SKU
-        на продукт и выбирает товары одним модельным вызовом. Request добавляется как есть к каждому
+        на продукт, дополняет их точными связями каталога и выбирает товары одним модельным вызовом. Request добавляется как есть к каждому
         названию в поисковом запросе; отдельного разбора текста нет, состав и количества он не меняет.
         Для готовых SKU только объединяет упаковки и создаёт ссылку, без поиска и модели.
         Если пользователь назвал товары свободным текстом, сначала найди конкретные SKU через search_products,
         затем передай выбранные ID и упаковки в source.type=skus. Не передавай список покупок в request.
         Ссылка не оформляет заказ, исходный план не изменяется.
 
-        Результат содержит сохранённую корзину, ссылку при наличии и нерешённые ингредиенты с recipe_ids.
+        Результат содержит одну сохранённую покупку с общим итогом и нерешённые ингредиенты с recipe_ids.
+        При числе SKU больше 30 cart_links содержит несколько магазинных ссылок. Покажи все успешные
+        части; ошибка одной не отменяет остальные. Не создавай новую покупку только ради разделения.
         Цена прямых SKU берётся из кэша, отсутствие карточки не блокирует ссылку. При неизвестной цене
         total_is_complete=false, subtotal_rub содержит только известную часть или null; соблюдение полного
         бюджета не подтверждено. Partial также означает неполный подбор или отказ ссылки в link_error.
@@ -422,7 +435,9 @@ class CreateCartInput(ToolInput):
 
         Частичный результат сам по себе не требует повторного подбора. Если пользователь уже разрешил
         подходящие замены или другую фасовку и есть конкретное изменение, которое может решить проблему,
-        продолжи через edit_cart без повторного согласия. Не повторяй безрезультатный подбор с теми же
+        продолжи через edit_cart с последним полученным cart_id без повторного согласия.
+        Исправление существующей покупки не требует create_cart; независимую корзину создавай,
+        когда пользователь просит отдельную покупку. Не повторяй безрезультатный подбор с теми же
         условиями и данными. Если продолжить в рамках поручения нельзя, покажи найденную часть,
         доступную ссылку и оставшиеся потребности с их назначением.
     """
@@ -438,9 +453,11 @@ class CreateCartInput(ToolInput):
     request: str = Field(
         default="",
         description=(
-            "Короткое поисковое уточнение, добавляемое КАЖДОМУ названию ингредиента без изменений, "
+            "Только явно заданное пользователем общее поисковое уточнение. По умолчанию пустая строка. "
+            "Этот текст добавляется КАЖДОМУ названию ингредиента без изменений, "
             "например «бренд X». Не передавай сюда весь диалог, список покупок, бюджет, исключение продуктов "
-            "или поручение изменить количества. Без общего уточнения и для готовых SKU оставь пустую строку"
+            "или поручение изменить количества. Пожелание «подешевле» тоже не поисковое уточнение: "
+            "бюджет учитывается при выборе найденных товаров. Без общего уточнения и для готовых SKU оставь пустую строку"
         ),
     )
 
@@ -464,6 +481,7 @@ async def create_cart(ctx: RunContext[Context], args: CreateCartInput) -> CartRe
                 d.person,
                 ctx.usage,
                 args.request,
+                progress=d.progress("create_cart", ctx.tool_call_id),
             )
         )
     except LookupError as exc:
@@ -475,7 +493,7 @@ async def create_cart(ctx: RunContext[Context], args: CreateCartInput) -> CartRe
 
 class ListCartsInput(ToolInput):
     description: ClassVar[str] = """
-        Показывает метаданные всех корзин и черновиков пользователя. Аргументов и пагинации нет.
+        Показывает метаданные нескрытых корзин и черновиков пользователя. Аргументов и пагинации нет.
         Для содержимого используй get_cart. Ничего не изменяет.
     """
 
@@ -485,7 +503,7 @@ class ListCartsInput(ToolInput):
 class CartListResult(ToolResult[list[CartSummary]]):
     data: list[CartSummary] | None = Field(
         default=None,
-        description="Метаданные всех корзин и черновиков пользователя; пустой список, если их нет",
+        description="Метаданные нескрытых корзин и черновиков пользователя; пустой список, если их нет",
     )
 
 
@@ -502,7 +520,8 @@ class CartId(ToolInput):
         Ничего не изменяет и не обновляет товары автоматически.
         В data поле unresolved содержит причины и recipe_ids для недостающих продуктов.
         При total_is_complete=false subtotal_rub — только стоимость найденной части.
-        cart_url — доступная ссылка, link_error — ошибка её создания. Partial означает неполный подбор
+        cart_links — части покупки со ссылками и ошибками; у прежних записей ссылка в cart_url.
+        link_error обобщает отказы создания ссылок. Partial означает неполный подбор
         или недоступную ссылку; needs_revision содержит замечания бюджета в issues.
         NOT_FOUND означает, что указанная версия недоступна текущему пользователю.
     """
@@ -529,15 +548,16 @@ class EditCartInput(ToolInput):
         Изменяет корзину по самодостаточному поручению и сохраняет полную новую версию.
         Передай конкретные продукты, количества с единицами и выбранные sku_id. Новые SKU предварительно
         найди через search_products или get_product_analogs; редактор не ищет замены сам.
-        В корзине из готовых SKU правка тоже работает с полным списком SKU и целыми упаковками.
+        В корзине из готовых SKU правка работает с полным списком единиц продажи: целые упаковки либо дробные кг/л.
         Для нового нормализованного продукта можно указать название: внутри выполняется локальный поиск
         по существующему справочнику. Новые записи справочника не создаются. Раскрой отсылки вроде
         «возьми второй»: история диалога редактору не передаётся. Всю структуру корзины копировать не нужно.
 
-        Сохраняет незатронутые позиции и их SKU, пересчитывает упаковки и стоимость, получает новую ссылку.
+        Сохраняет незатронутые позиции и их SKU, пересчитывает упаковки и стоимость, получает новые ссылки.
         Бюджет сохраняется из корзины; явное изменение суммы или снятие ограничения передай в request.
         Допуск 5% учитывает код, его не надо добавлять к сумме или согласовывать. Исходный план не меняется.
-        В data: новый cart_id, parent_id, products, items, limits, subtotal_rub, total_is_complete и cart_url.
+        В data: новый cart_id, parent_id, products, items, limits, subtotal_rub, total_is_complete и cart_links.
+        Каждая магазинная ссылка содержит до 30 разных SKU; для всей покупки нужны все успешные ссылки.
         partial означает нерешённые позиции в unresolved (с recipe_ids) или отказ ссылки в link_error.
         При total_is_complete=false subtotal_rub — стоимость найденной части. Ссылка не оформляет заказ.
         needs_revision содержит замечания проверки после максимум одной коррекции. error.message сообщает
@@ -559,7 +579,7 @@ class EditCartInput(ToolInput):
 class EditCartResult(ToolResult[CartView]):
     data: CartView | None = Field(
         default=None,
-        description="Полная новая версия корзины; parent_id указывает исходную, cart_url относится к новой",
+        description="Полная новая версия корзины; parent_id указывает исходную, cart_links относятся к новой",
     )
 
 
@@ -594,6 +614,7 @@ class ProductSearchResult(ToolResult[list[Product]]):
 async def search_products(ctx: RunContext[Context], args: ProductQuery) -> ProductSearchResult:
     try:
         rows = (await ctx.deps.products.search(args.query, 10))[:10]
+        rows = await ctx.deps.catalog.enrich_skus(rows)
         await ctx.deps.store.cache_skus(rows)
         return ProductSearchResult(data=[r.model_dump(mode="json") for r in rows[:10]])
     except IntegrationError as exc:
@@ -623,6 +644,7 @@ class ProductAnalogsResult(ToolResult[list[Product]]):
 async def get_product_analogs(ctx: RunContext[Context], args: SkuId) -> ProductAnalogsResult:
     try:
         rows = (await ctx.deps.products.analogs(args.sku_id, 10))[:10]
+        rows = await ctx.deps.catalog.enrich_skus(rows)
         await ctx.deps.store.cache_skus(rows)
         return ProductAnalogsResult(data=[p.model_dump(mode="json") for p in rows])
     except IntegrationError as exc:
@@ -680,6 +702,22 @@ async def update_memory(ctx: RunContext[Context], args: MemoryInput) -> MemoryRe
     return MemoryResult.from_result(result)
 
 
+def traced_tool[Input: ToolInput, Output: ToolResult](
+    fn: Callable[[RunContext[Context], Input], Awaitable[Output]],
+) -> Callable[[RunContext[Context], Input], Awaitable[Output]]:
+    """Добавляет статус предметного результата к уже созданному SDK span инструмента."""
+
+    @wraps(fn)
+    async def execute(ctx: RunContext[Context], args: Input) -> Output:
+        span = get_current_span()
+        span.set_attribute("langfuse.observation.input", args.model_dump_json())
+        result = await fn(ctx, args)
+        outcome(span, result.model_dump(mode="json"))
+        return result
+
+    return execute
+
+
 def build_toolset() -> FunctionToolset[Context]:
     """Собирает явный реестр; схемы выводятся SDK из единственных типов.
 
@@ -699,7 +737,7 @@ def build_toolset() -> FunctionToolset[Context]:
     return FunctionToolset(
         tools=[
             Tool(
-                fn,
+                traced_tool(fn),
                 description=cleandoc(get_type_hints(fn)["args"].description),
                 max_retries=0,
                 docstring_format="sphinx",

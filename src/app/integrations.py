@@ -4,7 +4,8 @@ import json
 import math
 import re
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -15,6 +16,9 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, TextContent
 
 from app.models import Product
+from app.tracing import outcome, stage
+
+CART_SKU_LIMIT = 30
 
 
 class Products(Protocol):
@@ -22,7 +26,7 @@ class Products(Protocol):
 
     async def search(self, query: str, limit: int) -> list[Product]: ...
     async def analogs(self, sku_id: str, limit: int) -> list[Product]: ...
-    async def cart_link(self, quantities: dict[str, int]) -> str: ...
+    async def cart_link(self, quantities: dict[str, float]) -> str: ...
 
 
 class IntegrationError(RuntimeError):
@@ -96,11 +100,14 @@ def parse_product(row: dict) -> Product:
         sku_id=str(sku),
         title=title,
         price_rub=float(value),
+        sale_unit={"кг": "kg", "л": "l"}.get(sale_unit),
         package_amount=amount,
         package_unit=unit,
         source_url=row.get("url"),
         composition=composition,
         package_basis=basis,
+        price_source="MCP ВкусВилла",
+        price_observed_at=datetime.now(UTC).isoformat(),
     )
 
 
@@ -145,6 +152,12 @@ class Vkusvill:
         self.client, self.mcp_url, self.timeout = client, mcp_url, timeout
 
     async def _call(self, name: str, arguments: dict) -> dict:
+        with stage(name, arguments) as span:
+            result = await self._request(name, arguments)
+            outcome(span, result)
+            return result
+
+    async def _request(self, name: str, arguments: dict) -> dict:
         started = time.monotonic()
         try:
             # Каждый вызов владеет своей сессией; HTTP-пул общий, параллельные поиски независимы.
@@ -219,16 +232,22 @@ class Vkusvill:
         data = await self._call("vkusvill_product_analogs", {"id": product_id(sku_id)})
         return self._products(data, "products", limit)
 
-    async def cart_link(self, quantities: dict[str, int]) -> str:
+    async def cart_link(self, quantities: dict[str, float]) -> str:
         """Передаёт выбранные ID в готовый инструмент ссылки без оформления заказа.
 
-        :param quantities: SKU и целое количество единиц продажи, без скрытого усечения
+        :param quantities: SKU и количество единиц продажи; весовые кг/л могут быть дробными
         :return: Ссылка ВкусВилла
         """
-        if not 1 <= len(quantities) <= 30 or any(
-            type(q) is not int or not 1 <= q <= 40 for q in quantities.values()
+        if not 1 <= len(quantities) <= CART_SKU_LIMIT or any(
+            type(q) not in (int, float)
+            or not math.isfinite(q)
+            or not 0.01 <= q <= 40
+            or Decimal(str(q)) % Decimal("0.01") != 0
+            for q in quantities.values()
         ):
-            raise IntegrationError("MCP допускает 1–30 SKU и 1–40 единиц каждого товара; ссылка не создана")
+            raise IntegrationError(
+                "В одну ссылку можно включить 1–30 разных товаров и 0,01–40 единиц каждого; ссылка не создана"
+            )
         data = await self._call(
             "vkusvill_cart_link_create",
             {

@@ -1,7 +1,7 @@
 import json
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, PromptedOutput
+from pydantic_ai import Agent, InstrumentationSettings, PromptedOutput
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import Model
 from pydantic_ai.usage import RunUsage, UsageLimits
@@ -17,9 +17,11 @@ class GuardDecision(BaseModel):
 class InputGuard:
     """Один структурированный запрос без tools и автоматической коррекции."""
 
-    def __init__(self, model: Model) -> None:
+    def __init__(self, model: Model, instrumentation: InstrumentationSettings | bool = False) -> None:
         self.agent = Agent(
             model,
+            name="input_guard",
+            instrument=instrumentation,
             instructions=load_prompt("input_guard"),
             output_type=PromptedOutput(GuardDecision),
             retries=0,

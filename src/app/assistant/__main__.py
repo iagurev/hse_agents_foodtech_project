@@ -3,13 +3,14 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from loguru import logger
 
 from app.assistant.agent import build_agent, build_model
 from app.assistant.session import Session
-from app.assistant.tokens import GLMTokenCounter
+from app.assistant.tokens import load_counter
 from app.catalog import Catalog
 from app.config import get_config
 from app.integrations import Vkusvill
@@ -17,6 +18,7 @@ from app.llm import ModelGateway
 from app.network import system_tls_context
 from app.retrieval.service import create_retriever
 from app.storage import Store
+from app.tracing import Tracing, outcome
 
 
 async def execute(args: argparse.Namespace) -> None:
@@ -44,12 +46,13 @@ async def execute(args: argparse.Namespace) -> None:
             timeout=config.integration_timeout_seconds, verify=system_tls_context()
         ) as product_client,
     ):
+        tracing = Tracing(config)
         model = build_model(config, client)
         retriever = await create_retriever(catalog, config)
-        counter = await GLMTokenCounter.load(model, config.tokenizer_cache_path, client)
+        counter = await load_counter(model, config.tokenizer_cache_path, client)
         session = Session(
             config,
-            build_agent(model),
+            build_agent(model, tracing.instrumentation),
             store,
             catalog,
             Vkusvill(product_client, config.vkusvill_mcp_url, config.integration_timeout_seconds),
@@ -58,15 +61,27 @@ async def execute(args: argparse.Namespace) -> None:
                 config.request_limit,
                 planning_model=build_model(config, client, planning=True),
                 planning_effort=config.planning_reasoning_effort,
+                instrumentation=tracing.instrumentation,
             ),
             counter,
             retriever,
         )
+
+        async def run_turn(text: str, turn_id: str | None = None) -> dict:
+            identity = turn_id or uuid4().hex
+            with tracing.turn(args.user, args.chat, identity, text) as span:
+                result = await session.run(args.user, args.chat, text, identity)
+                outcome(
+                    span, {"state": "error" if result.get("error") else "complete", "text": result["text"]}
+                )
+                span.set_attribute("langfuse.trace.output", result["text"])
+                return result
+
         try:
             if args.message:
                 print(
                     json.dumps(
-                        await session.run(args.user, args.chat, args.message, args.turn_id),
+                        await run_turn(args.message, args.turn_id),
                         ensure_ascii=False,
                     )
                 )
@@ -79,11 +94,12 @@ async def execute(args: argparse.Namespace) -> None:
                 if text.strip() in {"/exit", "/quit"}:
                     break
                 if text.strip():
-                    result = await session.run(args.user, args.chat, text)
+                    result = await run_turn(text)
                     print(result["text"])
         finally:
             if retriever:
                 retriever.close()
+            await asyncio.to_thread(tracing.close)
 
 
 def main() -> None:

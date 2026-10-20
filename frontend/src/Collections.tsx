@@ -9,9 +9,9 @@ import {
   Search,
   ShoppingBag,
 } from 'lucide-react';
-import { api, difficulties, errorText, go, money } from './api';
-import type { Cart, Plan, Recipe, RecipeSearchData, RecipeSummary, Result } from './api';
-import { Empty, ErrorNote, FoodImage, Loading } from './ui';
+import { api, difficulties, errorText, openDetail, money } from './api';
+import type { Cart, Plan, Recipe, RecipeSearchData, RecipeSearchLimits, RecipeSummary, Result } from './api';
+import { Empty, ErrorNote, FoodImage, Loading, useRestoreScroll } from './ui';
 
 export function Collections({
   kind,
@@ -25,28 +25,35 @@ export function Collections({
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(sessionStorage.getItem('recipe-search') || '');
   const [found, setFound] = useState<RecipeSummary[]>([]);
   const [searching, setSearching] = useState(false);
-  const [diagnostics, setDiagnostics] = useState<string[]>([]);
   useEffect(() => {
     if (kind !== 'recipes' || !search.trim()) {
       setSearching(false);
       setFound([]);
-      setDiagnostics([]);
       return;
     }
     let alive = true;
     setSearching(true);
     setError('');
     setFound([]);
-    setDiagnostics([]);
     const timer = setTimeout(() => {
-      api<Result<RecipeSearchData>>('/recipes/search', 'POST', { query: search })
+      api<Result<RecipeSearchData>>('/recipes/search', 'POST', {
+        query: search,
+        limits: {
+          exclude_products: null,
+          forbidden_equipment: null,
+          max_total_minutes: null,
+          max_difficulty: null,
+          meal_roles: null,
+          diet: null,
+          budget_rub: null,
+        } satisfies RecipeSearchLimits,
+      })
         .then((result) => {
           if (alive) {
             setFound(result.data.recipes);
-            setDiagnostics(result.data.diagnostics.map((d) => d.message));
           }
         })
         .catch((e) => alive && setError(errorText(e)))
@@ -97,6 +104,7 @@ export function Collections({
       clearInterval(timer);
     };
   }, [kind]);
+  useRestoreScroll(!loading && !searching);
   const title = kind === 'plans' ? 'Ваши планы' : kind === 'recipes' ? 'Рецепты' : 'Покупки';
   const filtered = search.trim() ? found : recipes;
   return (
@@ -125,7 +133,7 @@ export function Collections({
                     <button
                       className="plan-cover"
                       key={plan.plan_id}
-                      onClick={() => go(`/plan/${plan.plan_id}`)}
+                      onClick={() => openDetail(`/plan/${plan.plan_id}`)}
                     >
                       <FoodImage src={photo?.image_url} alt="" />
                       <div className="plan-cover-body">
@@ -142,7 +150,7 @@ export function Collections({
                                 : 'Меню готово'}
                           </small>
                         </div>
-                        <h2>План на {plan.days} дн.</h2>
+                        <h2>{plan.title}</h2>
                         <p>
                           {plan.meals.length
                             ? `${new Set(plan.meals.map((meal) => `${meal.day}:${meal.meal}`)).size} приёмов пищи · ≈ ${money(plan.totals.mean_rub)}`
@@ -181,17 +189,16 @@ export function Collections({
                   <Search size={18} />
                   <input
                     aria-label="Поиск рецептов по всей базе"
-                    placeholder="Блюдо, продукты или пожелания"
+                    placeholder="Название блюда или ингредиенты"
                     value={search}
-                    onChange={(e) => setSearch(e.target.value)}
+                    onChange={(e) => {
+                      setSearch(e.target.value);
+                      sessionStorage.setItem('recipe-search', e.target.value);
+                    }}
                   />
                 </label>
               }
-              {diagnostics.map((text, i) => (
-                <p key={i} className="muted" role="status">
-                  {text}
-                </p>
-              ))}
+              <h2>{search.trim() ? 'Результаты по всей базе' : 'Из ваших планов'}</h2>
               {searching ? (
                 <Loading />
               ) : filtered.length ? (
@@ -200,7 +207,7 @@ export function Collections({
                     <button
                       className="recipe-row"
                       key={r.recipe_id}
-                      onClick={() => go(`/recipe/${r.recipe_id}`)}
+                      onClick={() => openDetail(`/recipe/${r.recipe_id}`)}
                     >
                       <FoodImage src={r.image_url} alt="" />
                       <span>
@@ -221,7 +228,7 @@ export function Collections({
                   title={search ? 'Подходящие рецепты не найдены' : 'Найдите что-нибудь вкусное'}
                 >
                   {search
-                    ? 'Уточните блюдо или пожелания. Условия поиска также могут ограничивать выдачу.'
+                    ? 'Попробуйте другое название блюда или ингредиенты.'
                     : 'Введите блюдо или продукты в поиске. Рецепты ваших планов также сохранятся здесь.'}
                 </Empty>
               )}
@@ -230,11 +237,11 @@ export function Collections({
           {kind === 'carts' &&
             (carts.length ? (
               <div className="shopping-list">
-                {carts.map(({ data: cart, status }, i) => (
+                {carts.map(({ data: cart, status }) => (
                   <button
                     className="shopping-summary"
                     key={cart.cart_id}
-                    onClick={() => go(`/cart/${cart.cart_id}`)}
+                    onClick={() => openDetail(`/cart/${cart.cart_id}`)}
                   >
                     <div className="inline">
                       <ShoppingBag size={23} />
@@ -246,9 +253,9 @@ export function Collections({
                             : 'Готово'}
                       </span>
                     </div>
-                    <h2>{i === 0 ? 'Последние покупки' : 'Список покупок'}</h2>
+                    <h2>{cart.title}</h2>
                     <p>
-                      {cart.items.length} позиций
+                      Позиций: {cart.items.length}
                       {cart.unresolved.length > 0 ? ` · ${cart.unresolved.length} не подобрано` : ''}
                     </p>
                     <div className="inline">

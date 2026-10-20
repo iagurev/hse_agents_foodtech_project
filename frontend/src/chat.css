@@ -20,7 +20,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 40px;
+  min-height: 44px;
   min-width: 0;
   color: var(--muted);
   font-size: 12px;
@@ -142,13 +142,41 @@
   overflow-wrap: anywhere;
   text-decoration: underline;
 }
+.response-time {
+  margin-left: 4px;
+  color: var(--muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.operation-status {
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.operation-completed {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.operation-completed svg {
+  flex: none;
+  margin-top: 4px;
+}
+.operation-detail {
+  padding-left: 24px;
+  margin-top: 3px;
+}
 .working {
   display: flex;
   align-items: center;
   gap: 8px;
   color: var(--muted);
   font-size: 12px;
-  margin-top: 16px;
+}
+.working .spinner {
+  flex: none;
 }
 .composer-area {
   padding: 10px 16px 12px;
@@ -183,8 +211,8 @@
   border-color: var(--green);
 }
 .send {
-  height: 40px;
-  width: 40px;
+  height: 44px;
+  width: 44px;
   flex-shrink: 0;
   display: grid;
   place-items: center;
@@ -208,6 +236,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  min-height: 44px;
   padding: 8px 14px;
   border-radius: 18px;
   background: var(--green-dark);
@@ -235,6 +264,7 @@
   display: block;
   font-size: 13px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .artifact-card small {
   display: block;
@@ -247,6 +277,7 @@
   width: 54px;
   height: 58px;
   border-radius: 9px;
+  flex-shrink: 0;
 }
 .artifact-icon {
   color: var(--green);
@@ -295,4 +326,100 @@
   border: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
+}
+
+.recipe-option {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.recipe-option .artifact-card {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.recipe-option .artifact-card strong {
+  font-size: 14px;
+}
+.recipe-portion {
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.recipe-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.recipe-choice .secondary {
+  min-height: 44px;
+  padding: 8px 14px;
+}
+.recipe-choice .quantity-field {
+  margin: 0;
+}
+.recipe-choice input {
+  width: 76px;
+}
+.recipe-picker .action-stack {
+  margin-top: 18px;
+  margin-bottom: 12px;
+  gap: 6px;
+}
+.recipe-picker {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+}
+@media (max-width: 370px) {
+  .chat-feed {
+    padding: 18px;
+  }
+}
+
+.message-references {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 4px;
+  min-width: 0;
+}
+.message-reference {
+  display: flex;
+  align-items: center;
+  border-radius: 12px;
+  background: var(--white);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  min-width: 0;
+}
+.message-reference button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  min-height: 44px;
+  text-align: left;
+}
+.message-reference button:first-child {
+  flex: 1;
+  min-width: 0;
+}
+.message-reference svg {
+  flex-shrink: 0;
+}
+.message-reference span {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.message-reference small {
+  display: block;
+  color: var(--muted);
+  margin-top: 3px;
+}
+.composer-area > .message-references {
+  max-height: 140px;
+  overflow-y: auto;
+  margin-top: 0;
 }

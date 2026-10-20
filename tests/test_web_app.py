@@ -311,8 +311,8 @@ def test_projection_never_includes_reasoning_or_instructions():
     assert "secret" not in json.dumps(view) and "hidden" not in json.dumps(view)
 
 
-async def test_recipe_results_have_cards_live_and_after_reload(catalog):
-    for result in [await catalog.search("Овсянка"), await catalog.get(["r1"])]:
+async def test_recipe_results_have_cards_live_and_after_reload(catalog, no_recipe_limits):
+    for result in [await catalog.search("Овсянка", no_recipe_limits), await catalog.get(["r1"])]:
         recipes = result.data["recipes"]
         assert recipes
         expected = [r["recipe_id"] for r in recipes]
@@ -378,3 +378,427 @@ async def test_cancelled_run_keeps_compaction_metrics(web):
     assert row["state"] == "cancelled" and report["requests"] == 3
     assert report["cost_usd"] == 0.02 and report["compaction"]["requests"] == 1
     assert report["guard"]["requests"] == 1
+
+
+async def test_progress_reconnect_total_time_and_parallel_tools(web):
+    ready, release = asyncio.Event(), asyncio.Event()
+    original = web.harness.run
+
+    async def progressing(*args, **kwargs):
+        emit = args[4]
+        await emit({"type": "tool_start", "name": "create_cart", "call_id": "cart"})
+        await emit(
+            {
+                "type": "progress",
+                "name": "create_cart",
+                "call_id": "cart",
+                "stage": "cart_search",
+                "completed": 2,
+                "total": 3,
+                "found": 1,
+            }
+        )
+        await emit({"type": "tool_start", "name": "get_plan", "call_id": "plan"})
+        await emit({"type": "tool_end", "name": "get_plan", "call_id": "plan", "content": {}})
+        ready.set()
+        await release.wait()
+        await emit({"type": "tool_end", "name": "create_cart", "call_id": "cart", "content": {}})
+        return await original(*args, **kwargs)
+
+    web.harness.run = progressing
+    cid = await chat(web)
+    runs = web.app.state.runs
+    await runs.start(web.uid, cid, "progress", "Корзина")
+    await asyncio.wait_for(ready.wait(), 2)
+    runs.started[cid] -= 61
+    before = runs.started[cid]
+    await runs.start(web.uid, cid, "progress", "Корзина")
+    assert runs.started[cid] == before
+    rows = (await web.client.get(f"/api/chats/{cid}/messages")).json()
+    assert rows[-1]["progress"]["stage"] == "cart_search"
+    assert rows[-1]["progress"]["found"] == 1
+    assert rows[-1]["elapsed_seconds"] >= 61
+    stream = runs.events(cid, "progress")
+    snapshot = json.loads((await anext(stream)).removeprefix("data: "))
+    await stream.aclose()
+    assert snapshot["progress"] == rows[-1]["progress"]
+    assert snapshot["elapsed_seconds"] >= rows[-1]["elapsed_seconds"]
+    release.set()
+    final = (await complete(web, cid))[-1]
+    assert final["elapsed_seconds"] >= 61 and final["state"] == "complete"
+    assert runs.live[cid]["progress"] is None
+    assert cid not in runs.started
+    runs.live.clear()
+    restored = (await web.client.get(f"/api/chats/{cid}/messages")).json()[-1]
+    assert restored["elapsed_seconds"] == final["elapsed_seconds"]
+    assert "report" not in restored
+    sse = await web.client.get(f"/api/chats/{cid}/turns/progress/events")
+    assert json.loads(sse.text.removeprefix("data: "))["elapsed_seconds"] == final["elapsed_seconds"]
+
+
+async def test_terminal_sse_waits_for_saved_status(web, monkeypatch):
+    ready, release = asyncio.Event(), asyncio.Event()
+    runs = web.app.state.runs
+    original = runs._persist
+
+    async def delayed(chat_id, report=None):
+        if runs.live[chat_id]["state"] == "complete":
+            ready.set()
+            await release.wait()
+        await original(chat_id, report)
+
+    monkeypatch.setattr(runs, "_persist", delayed)
+    cid = await chat(web)
+    await runs.start(web.uid, cid, "terminal", "Hello")
+    await asyncio.wait_for(ready.wait(), 2)
+    stream = runs.events(cid, "terminal")
+    event = asyncio.create_task(anext(stream))
+    try:
+        done, _ = await asyncio.wait({event}, timeout=0.05)
+        assert not done
+        release.set()
+        snapshot = json.loads((await asyncio.wait_for(event, 2)).removeprefix("data: "))
+        assert snapshot["state"] == "complete"
+        assert not (await web.store.chats(web.uid))[0]["active"]
+    finally:
+        release.set()
+        await runs.tasks[cid]
+        await event
+        await stream.aclose()
+
+
+async def test_elapsed_time_stops_on_cancellation_and_guard_failure(web):
+    cid = await chat(web)
+    web.guard.wait = asyncio.Event()
+    runs = web.app.state.runs
+    await runs.start(web.uid, cid, "cancel-clock", "Hello")
+    runs.started[cid] -= 7
+    await runs.cancel(cid)
+    first = (await web.client.get(f"/api/chats/{cid}/messages")).json()[-1]
+    second = (await web.client.get(f"/api/chats/{cid}/messages")).json()[-1]
+    assert first["state"] == "cancelled" and first["elapsed_seconds"] >= 7
+    assert second["elapsed_seconds"] == first["elapsed_seconds"]
+    web.guard.wait = None
+    web.guard.fail = True
+    await runs.start(web.uid, cid, "guard-error", "Hello")
+    final = (await complete(web, cid))[-1]
+    assert final["state"] == "error" and final["elapsed_seconds"] is not None
+    assert cid not in runs.started
+
+
+async def test_interrupted_timing_is_partial_and_old_unknown_time_is_absent(web):
+    cid = await chat(web)
+    async with web.store.connection() as db:
+        await db.executemany(
+            "INSERT INTO web_runs(chat_id,turn_id,text,state,created_at,report) VALUES(?,?,?, 'running',1,?)",
+            [(cid, "checkpoint", "a", '{"elapsed_seconds": 12.5}'), (cid, "old", "b", "{}")],
+        )
+        await db.commit()
+    await web.store.initialize()
+    rows = {r["turn_id"]: r for r in (await web.client.get(f"/api/chats/{cid}/messages")).json()}
+    assert rows["checkpoint"]["elapsed_seconds"] == 12.5
+    assert rows["checkpoint"]["elapsed_is_partial"] is True
+    assert rows["old"]["elapsed_seconds"] is None
+
+
+async def test_manual_weighted_quantity_preserves_units_versions_and_replay(web):
+    from app.models import Product
+
+    await web.store.cache_skus(
+        [
+            Product(
+                sku_id="weight",
+                title="Индейка",
+                price_rub=928,
+                sale_unit="kg",
+                package_amount=1000,
+                package_unit="g",
+            ),
+            Product(sku_id="pack", title="Пачка", price_rub=100),
+        ]
+    )
+    source = SkusSource(
+        type="skus", items=[SkuAmount(sku_id="weight", packages=0.25), SkuAmount(sku_id="pack", packages=1)]
+    )
+    shopper = web.harness.shopper
+    limits = CartLimits(budget_rub=None)
+    payload, issues, quantities = await shopper.assemble_skus(source.items, limits)
+    old = await shopper.save(web.uid, "weight-seed", source, limits, payload, issues, quantities)
+    cid = old.data["cart_id"]
+    body = {
+        "operation_id": "weight-edit",
+        "items": [{"sku_id": "weight", "packages": 0.29}, {"sku_id": "pack", "packages": 0.5}],
+        "unresolved_indices": [],
+    }
+    assert (await web.client.put(f"/api/carts/{cid}", json=body)).status_code == 422
+    body["items"][1]["packages"] = 1
+    response = await web.client.put(f"/api/carts/{cid}", json=body)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["items"][0]["packages"] == 0.29
+    assert data["items"][0]["product"]["sale_unit"] == "kg"
+    assert data["subtotal_rub"] == 369.12
+    assert (await web.client.put(f"/api/carts/{cid}", json=body)).json() == response.json()
+    assert await web.store.get_object(web.uid, "cart", cid) == old
+
+
+async def test_titles_hidden_chains_and_ownership(web, recipe):
+    plan = await save_plan(web, recipe)
+    pid = plan.data["plan_id"]
+    async with web.store.connection() as db:
+        # 19 Oct 21:30 UTC is 20 Oct in Moscow.
+        await db.execute("UPDATE object_meta SET created_at=? WHERE root_id=?", (1792445400, pid))
+        await db.commit()
+    view = (await web.client.get(f"/api/plans/{pid}")).json()["data"]
+    assert view["title"] == "Меню на 1 день · 20.10.2026"
+    for bad in ["  ", "x" * 81]:
+        assert (await web.client.patch(f"/api/plans/{pid}/title", json={"title": bad})).status_code == 422
+    assert (
+        await web.client.patch(f"/api/plans/{pid}/title", json={"title": "  Моё   меню\nна неделю  "})
+    ).json() == {"title": "Моё меню на неделю"}
+    for _ in range(2):
+        assert (await web.client.post(f"/api/plans/{pid}/hide")).status_code == 200
+    assert (await web.client.get("/api/plans")).json() == []
+    assert (await web.client.get("/api/recipes")).json() == []
+    assert (await web.store.list_objects(web.uid, "plan")).data == []
+    body = {"operation_id": "hidden-edit", "meals": [{"index": 0, "servings": 1.5}]}
+    edited = (await web.client.put(f"/api/plans/{pid}", json=body)).json()
+    assert edited["data"]["hidden"] and edited["data"]["title"] == "Моё меню на неделю"
+    assert edited["data"]["totals"]["mean_rub"] == 30
+    assert (await web.client.put(f"/api/plans/{pid}", json=body)).json() == edited
+    assert (await web.store.get_object(web.uid, "plan", pid)) == plan
+    assert (await web.store.replay(web.uid, "seed")) == plan
+    assert (await web.client.get("/api/plans")).json() == []
+    # A separate user's versions cannot be renamed, hidden or opened.
+    foreign = await web.store.save_object("other", "plan", {}, Result(), "foreign")
+    fid = foreign.data["plan_id"]
+    assert (await web.client.patch(f"/api/plans/{fid}/title", json={"title": "no"})).status_code == 404
+    assert (await web.client.post(f"/api/plans/{fid}/hide")).status_code == 404
+    assert (await web.client.get(f"/api/plans/{fid}")).status_code == 404
+    async with web.store.connection() as db:
+        await db.execute("UPDATE object_meta SET created_at=NULL,title=NULL WHERE root_id=?", (pid,))
+        await db.commit()
+    await web.store.initialize()
+    assert (await web.client.get(f"/api/plans/{pid}")).json()["data"]["title"] == "Меню на 1 день"
+
+
+async def test_cart_title_survives_independent_manual_edit_and_plan_hide(web, recipe):
+    from app.models import PlanSource
+
+    plan = await save_plan(web, recipe)
+    pid = plan.data["plan_id"]
+    await web.client.patch(f"/api/plans/{pid}/title", json={"title": "Завтраки"})
+    shopper = web.harness.shopper
+    payload, issues, quantities = await shopper.assemble_skus(
+        [SkuAmount(sku_id="sku", packages=1)], CartLimits(budget_rub=None)
+    )
+    cart = await shopper.save(
+        web.uid,
+        "cart-title",
+        PlanSource(type="plan", plan_id=pid),
+        CartLimits(budget_rub=None),
+        payload,
+        issues,
+        quantities,
+    )
+    cid = cart.data["cart_id"]
+    await web.client.post(f"/api/plans/{pid}/hide")
+    assert (await web.client.get("/api/carts")).json()[0]["data"]["title"] == "Завтраки"
+    body = {
+        "operation_id": "title-edit",
+        "items": [{"sku_id": "sku", "packages": 2}],
+        "unresolved_indices": [],
+    }
+    edited = (await web.client.put(f"/api/carts/{cid}", json=body)).json()["data"]
+    assert edited["source"]["type"] == "skus" and edited["title"] == "Завтраки"
+    await web.client.patch(f"/api/carts/{edited['cart_id']}/title", json={"title": "Моя покупка"})
+    assert (await web.client.get(f"/api/carts/{cid}")).json()["data"]["title"] == "Моя покупка"
+    await web.client.post(f"/api/carts/{cid}/hide")
+    assert (await web.client.get("/api/carts")).json() == []
+    assert (await web.store.list_objects(web.uid, "cart")).data == []
+
+
+async def test_card_projection_resolves_missing_ancestor_and_preserves_old_turn(web, recipe):
+    from app.web.presentation import project_cards
+
+    root = await save_plan(web, recipe)
+    middle = await web.store.save_object(web.uid, "plan", root.data, Result(), "v2", root.data["plan_id"])
+    last = await web.store.save_object(web.uid, "plan", middle.data, Result(), "v3", middle.data["plan_id"])
+    independent = await web.store.save_object(web.uid, "plan", root.data, Result(), "independent")
+    cid = await chat(web)
+
+    def raw(results):
+        return ModelMessagesTypeAdapter.dump_json(
+            [
+                ModelRequest(
+                    parts=[
+                        UserPromptPart("test"),
+                        *[
+                            ToolReturnPart("get_plan", r.model_dump(mode="json"), str(i))
+                            for i, r in enumerate(results)
+                        ],
+                    ]
+                )
+            ]
+        ).decode()
+
+    await web.store.save_turn(cid, "old", raw([root]), True)
+    await web.store.save_turn(cid, "new", raw([root, last, independent]), True)
+    expected = await project_cards(
+        web.store, web.catalog, web.uid, artifacts(root) + artifacts(last) + artifacts(independent)
+    )
+    assert [c["id"] for c in expected] == [last.data["plan_id"], independent.data["plan_id"]]
+    backwards = await project_cards(web.store, web.catalog, web.uid, artifacts(last) + artifacts(root))
+    assert backwards[0]["id"] == last.data["plan_id"]
+
+    rows = (await web.client.get(f"/api/chats/{cid}/messages")).json()
+    assert rows[0]["artifacts"][0]["id"] == root.data["plan_id"]
+    assert rows[1]["artifacts"] == expected
+    async with web.store.connection() as db:
+        await db.execute(
+            "INSERT INTO web_runs(chat_id,turn_id,text,state,created_at) VALUES(?, 'new', 'test', 'complete', 1)",
+            (cid,),
+        )
+        await db.commit()
+    event = await web.client.get(f"/api/chats/{cid}/turns/new/events")
+    snapshot = json.loads(next(line[6:] for line in event.text.splitlines() if line.startswith("data: ")))
+    assert snapshot["artifacts"] == expected
+
+
+async def test_recipe_image_delivery_limits_cache_and_sources(web, recipe, monkeypatch):
+    from app.web.presentation import image_source, image_url
+
+    source = "https://vkusvill.ru/upload/recipe.jpg"
+    monkeypatch.setattr(web.catalog, "recipes_by_ids", lambda ids: image_recipes())
+
+    async def image_recipes():
+        return {"r1": recipe.model_copy(update={"image_url": source})}
+
+    requested = []
+    response_kind = "ok"
+
+    async def serve(request):
+        requested.append(str(request.url))
+        if response_kind == "timeout":
+            raise httpx.ReadTimeout("timeout")
+        if response_kind == "type":
+            return httpx.Response(200, content=b"<html>", headers={"content-type": "text/html"})
+        if response_kind == "large":
+            return httpx.Response(
+                200, content=b"a" * (8 * 1024 * 1024 + 1), headers={"content-type": "image/webp"}
+            )
+        return httpx.Response(200, content=b"photo", headers={"content-type": "image/webp"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as client:
+        web.app.state.media_client = client
+        result = await web.client.get("/api/recipes/r1/image")
+        assert result.status_code == 200 and result.content == b"photo"
+        assert result.headers["cache-control"] == "private, max-age=86400"
+        assert requested[0].startswith("https://wsrv.nl/?") and "w=960" in requested[0]
+        for response_kind in ["timeout", "type", "large"]:
+            result = await web.client.get("/api/recipes/r1/image")
+            assert result.status_code == 502 and result.headers["cache-control"] == "no-store"
+        source = "https://images.gastronom.ru/a.jpg"
+        response_kind = "ok"
+        await web.client.get("/api/recipes/r1/image")
+        assert requested[-1] == source
+    assert image_url("r1", source) != image_url("r1", source + "?changed")
+    assert image_source("https://example.org/a.jpg") is None
+    assert image_source("http://images.gastronom.ru/a.jpg") is None
+    await web.client.post("/api/auth/logout")
+    assert (await web.client.get("/api/recipes/r1/image")).status_code == 401
+
+
+async def test_opened_recipes_are_final_selection_for_live_and_reload(web):
+    from app.web.presentation import project_cards
+
+    search = Result(
+        data={
+            "recipes": [
+                {"recipe_id": "r1", "title": "Первое"},
+                {"recipe_id": "r2", "title": "Второе"},
+            ]
+        }
+    )
+    chosen = Result(data={"recipes": [{"recipe_id": "r2", "title": "Второе"}]})
+    calls = [("search_recipes", search), ("get_recipes", chosen), ("search_recipes", search)]
+    live = [card for tool, result in calls for card in artifacts(result, tool)]
+    raw = ModelMessagesTypeAdapter.dump_json(
+        [
+            ModelRequest(parts=[ToolReturnPart(tool, result.model_dump(mode="json"), f"c{i}")])
+            for i, (tool, result) in enumerate(calls)
+        ]
+    ).decode()
+    expected = await project_cards(web.store, web.catalog, web.uid, live)
+    assert [c["id"] for c in expected] == ["r2"]
+    assert expected[0]["selectable"] and "_opened" not in expected[0]
+    assert (
+        await project_cards(web.store, web.catalog, web.uid, project_messages(raw)["artifacts"]) == expected
+    )
+    assert len(await project_cards(web.store, web.catalog, web.uid, artifacts(search, "search_recipes"))) == 2
+
+
+@pytest.mark.parametrize("activity", [None, "inactive", "low_active", "active", "very_active"])
+async def test_optional_activity_roundtrip(web, activity):
+    profile = PROFILE | {"activity": activity}
+    response = await web.client.put("/api/profile", json=profile)
+    assert response.status_code == 200
+    assert response.json()["profile"]["activity"] == activity
+    assert (await web.store.person(web.uid)).questionnaire["activity"] == activity
+    for required in ("goal", "sex", "age", "height_cm", "weight_kg"):
+        assert (
+            await web.client.put("/api/profile", json={k: v for k, v in profile.items() if k != required})
+        ).status_code == 422
+
+
+async def test_references_exact_hidden_version_history_and_replay(web, recipe):
+    plan = await save_plan(web, recipe)
+    pid = plan.data["plan_id"]
+    await web.client.patch(f"/api/plans/{pid}/title", json={"title": "Наше меню"})
+    await web.client.put(
+        f"/api/plans/{pid}", json={"operation_id": "later", "meals": [{"index": 0, "servings": 1.5}]}
+    )
+    await web.client.post(f"/api/plans/{pid}/hide")
+    cid = await chat(web)
+    body = {
+        "turn_id": "reference",
+        "text": "Собери покупки по этому меню.",
+        "references": [{"kind": "plan", "id": pid}, {"kind": "recipe", "id": "r1", "servings": 1.5}],
+    }
+    assert (await web.client.post(f"/api/chats/{cid}/turns", json=body)).status_code == 200
+    row = (await complete(web, cid))[-1]
+    assert row["text"] == body["text"] and pid not in row["text"]
+    assert row["references"][0] == {"kind": "plan", "id": pid, "title": "Наше меню"}
+    assert row["references"][1]["servings"] == 1.5
+    _, _, history = await web.store.history(cid)
+    assert pid in history[-1]["messages"] and "Объекты поручения" in history[-1]["messages"]
+    assert web.guard.calls[-1][0] == body["text"]
+    assert (await web.client.post(f"/api/chats/{cid}/turns", json=body)).status_code == 200
+    assert web.harness.calls == 1
+    # Проверяем сохранённый SSE-снимок после удаления in-process состояния.
+    web.app.state.runs.live.clear()
+    events = await web.client.get(f"/api/chats/{cid}/turns/reference/events")
+    snapshot = json.loads(events.text.removeprefix("data: ").strip())
+    assert snapshot["references"] == row["references"]
+
+
+async def test_reference_access_and_invalid_values_before_execution(web, recipe):
+    plan = await save_plan(web, recipe)
+    pid = plan.data["plan_id"]
+    await web.client.post(
+        "/api/auth/register", json={"login": "other-ref", "password": "x", "profile": PROFILE}
+    )
+    cid = await chat(web)
+    for ref, status in [
+        ({"kind": "plan", "id": pid}, 404),
+        ({"kind": "recipe", "id": "missing"}, 404),
+        ({"kind": "recipe", "id": "r1", "servings": 0}, 422),
+        ({"kind": "recipe", "id": "r1", "servings": True}, 422),
+        ({"kind": "recipe", "id": "r1", "title": "Подменённое название"}, 422),
+    ]:
+        assert (
+            await web.client.post(
+                f"/api/chats/{cid}/turns", json={"turn_id": "invalid", "text": "Обсудим", "references": [ref]}
+            )
+        ).status_code == status
+    assert web.harness.calls == 0 and not web.guard.calls

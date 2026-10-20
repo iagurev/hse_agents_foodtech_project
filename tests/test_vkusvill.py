@@ -152,7 +152,8 @@ async def test_timeout_and_cancellation_do_not_retry():
         {"185": 41},
         {"185": 0},
         {"185": True},
-        {"185": 1.5},
+        {"185": 0.001},
+        {"185": float("nan")},
         {"sku185": 1},
         {"0": 1},
         {str(i): 1 for i in range(1, 32)},
@@ -189,3 +190,10 @@ def test_missing_or_invalid_price_is_not_zero(native_product, price):
     native_product["price"]["current"] = price
     with pytest.raises(IntegrationError):
         parse_product(native_product)
+
+
+async def test_link_transmits_fractional_weight_without_integer_rounding():
+    server = MCPServer({"ok": True, "data": {"link": "https://vkusvill.ru/mobile?basket&share=test"}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(server.handle)) as client:
+        await Vkusvill(client, "https://mcp.vkusvill.ru/mcp").cart_link({"1066": 0.25, "185": 2})
+    assert server.calls[-1]["arguments"]["products"] == [{"id": 1066, "q": 0.25}, {"id": 185, "q": 2}]

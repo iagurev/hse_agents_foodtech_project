@@ -215,7 +215,7 @@ def test_all_public_fields_are_described_and_typed_without_wrapping_args():
     source = CreateCartInput.model_json_schema()["properties"]["source"]
     assert set(source["discriminator"]["mapping"]) == {"plan", "recipes", "skus"}
     assert SkuAmount(sku_id="one").packages == 1
-    for invalid in [0, -1, 0.5, True, "2"]:
+    for invalid in [0, -1, 0.001, True, "2"]:
         with pytest.raises(ValidationError):
             SkuAmount(sku_id="one", packages=invalid)
 
@@ -306,3 +306,32 @@ async def test_direct_edit_preserves_unresolved_unless_explicitly_removed(store)
     shopper.generator = ScriptedGenerator([SkuCartRevision(items=source.items, limits=limits, unresolved=[])])
     removed = await shopper.edit("u", "remove", edited.data["cart_id"], "Убери творог", RunUsage())
     assert removed.data["unresolved"] == []
+
+
+@pytest.mark.parametrize("fail_second", [False, True])
+async def test_large_cart_keeps_one_object_and_links_each_group_without_replay(store, catalog, fail_second):
+    class SplitLinks(DirectProducts):
+        async def cart_link(self, quantities):
+            self.links.append(quantities)
+            if fail_second and len(self.links) == 2:
+                raise IntegrationError("HTTP 502")
+            return f"https://example.org/cart-{len(self.links)}"
+
+    gateway = SplitLinks()
+    shopper = Shopper(store, catalog, gateway, NoSelection())
+    await store.cache_skus([Product(sku_id=str(i), title=str(i), price_rub=10) for i in range(32)])
+    source = sku_source(*[(str(i), 1) for i in range(32)])
+    result = await shopper.run("u", "large", source, CartLimits(budget_rub=400), PersonContext(), RunUsage())
+    public = CartResult.from_result(result).data
+    assert len(public.items) == 32 and public.subtotal_rub == 320
+    assert [len(group) for group in gateway.links] == [30, 2]
+    assert set().union(*[set(group) for group in gateway.links]) == {str(i) for i in range(32)}
+    assert public.cart_url is None
+    assert [len(link.sku_ids) for link in public.cart_links] == [30, 2]
+    assert public.cart_links[0].url == "https://example.org/cart-1"
+    assert public.cart_links[1].url == (None if fail_second else "https://example.org/cart-2")
+    assert result.status == ("partial" if fail_second else "ok")
+    assert public.link_error == ("Часть 2: HTTP 502" if fail_second else None)
+    again = await shopper.run("u", "large", source, CartLimits(budget_rub=400), PersonContext(), RunUsage())
+    assert again == result and len(gateway.links) == 2
+    assert len((await store.list_objects("u", "cart")).data) == 1

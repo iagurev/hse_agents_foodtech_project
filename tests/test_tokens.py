@@ -14,7 +14,7 @@ from pydantic_ai.tools import ToolDefinition
 from tokenizers import Tokenizer, models, pre_tokenizers
 
 from app.assistant.agent import build_model
-from app.assistant.tokens import REVISION, GLMTokenCounter
+from app.assistant.tokens import REVISION, GLMTokenCounter, LunaTokenCounter, load_counter
 from app.config import Config
 
 
@@ -29,7 +29,8 @@ def tokenizer_assets(tmp_path):
     return tmp_path
 
 
-async def test_counter_matches_sdk_wire_with_transformed_schema(tokenizer_assets):
+@pytest.mark.parametrize("kind", ["glm", "luna"])
+async def test_counter_matches_sdk_wire_with_transformed_schema(tokenizer_assets, monkeypatch, kind):
     captured = []
 
     def response(req):
@@ -55,7 +56,11 @@ async def test_counter_matches_sdk_wire_with_transformed_schema(tokenizer_assets
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
         model = build_model(Config(_env_file=None, openrouter_api_key="test"), client)
-        counter = GLMTokenCounter(model, tokenizer_assets)
+        if kind == "luna":
+            monkeypatch.setattr("app.assistant.tokens.tiktoken.get_encoding", lambda _: FakeEncoding())
+            counter = LunaTokenCounter(model)
+        else:
+            counter = GLMTokenCounter(model, tokenizer_assets)
         tool = ToolDefinition(
             name="lookup",
             description="Описание",
@@ -79,8 +84,7 @@ async def test_counter_matches_sdk_wire_with_transformed_schema(tokenizer_assets
         await model.request(messages, None, ModelRequestParameters(function_tools=[tool]))
         wire = captured[0]
         assert "$ref" not in json.dumps(wire["tools"])
-        expected = counter.template.render(messages=wire["messages"], tools=wire["tools"])
-        assert estimated == len(counter.tokenizer.encode(expected, add_special_tokens=False).ids)
+        assert estimated == counter.count_wire(wire["messages"], wire["tools"])
         assert estimated > await counter.count(messages, [])
         assert estimated > await counter.count([ModelRequest(parts=[UserPromptPart("hello")])], [tool])
 
@@ -195,3 +199,37 @@ async def test_truncated_summary_is_charged_but_rejected(finish_reason):
         with pytest.raises(UnexpectedModelBehavior):
             await gateway.compact({"history": []}, usage)
         assert usage.requests == 1 and usage.details["cost_nano_usd"] == 1000000
+
+
+class FakeEncoding:
+    def encode(self, text, **kwargs):
+        return text.encode()
+
+
+async def test_luna_reasoning_and_counter_startup(monkeypatch, tmp_path):
+    monkeypatch.setattr("app.assistant.tokens.tiktoken.get_encoding", lambda _: FakeEncoding())
+    async with httpx.AsyncClient() as client:
+        model = build_model(Config(_env_file=None, openrouter_api_key="test"), client)
+        counter = await load_counter(model, tmp_path, client)
+        assert isinstance(counter, LunaTokenCounter)
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_details": [{"type": "reasoning.encrypted", "data": "opaque" * 100}],
+            }
+        ]
+        original = json.dumps(messages)
+        assert counter.count_wire(messages, []) > counter.count_wire([], []) + 600
+        assert json.dumps(messages) == original
+        assert await counter.text("<|endoftext|>") > 0
+
+        def unavailable(_):
+            raise OSError("offline")
+
+        monkeypatch.setattr("app.assistant.tokens.tiktoken.get_encoding", unavailable)
+        with pytest.raises(ValueError, match="токенизатор Luna"):
+            await load_counter(model, tmp_path, client)
+        unsupported = build_model(Config(_env_file=None, openrouter_api_key="test", model="unknown"), client)
+        with pytest.raises(ValueError, match="Не настроен"):
+            await load_counter(unsupported, tmp_path, client)

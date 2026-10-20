@@ -1,11 +1,11 @@
 import math
-from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue, ValidationError
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import RunUsage
 
 from app.catalog import Catalog
+from app.energy import energy_reference
 from app.llm import Generator
 from app.models import (
     Issue,
@@ -17,11 +17,9 @@ from app.models import (
     Result,
     budget_ceiling,
 )
-from app.retrieval.models import SearchConstraints
+from app.progress import Progress
 from app.storage import Store
-
-if TYPE_CHECKING:
-    from app.retrieval.service import RecipeRetriever
+from app.tracing import stage
 
 
 def evaluate(
@@ -132,16 +130,8 @@ def evaluate(
 class Planner:
     """Создание меню из каталога и независимое редактирование полной версии."""
 
-    def __init__(
-        self,
-        store: Store,
-        catalog: Catalog,
-        generator: Generator,
-        retriever: "RecipeRetriever | None" = None,
-        candidate_strategy: Literal["retrieval", "full_catalog"] = "retrieval",
-    ) -> None:
+    def __init__(self, store: Store, catalog: Catalog, generator: Generator) -> None:
         self.store, self.catalog, self.generator = store, catalog, generator
-        self.retriever, self.candidate_strategy = retriever, candidate_strategy
 
     async def run(
         self,
@@ -152,8 +142,7 @@ class Planner:
         limits: PlanLimits,
         context: PersonContext,
         usage: RunUsage,
-        *,
-        constraints: SearchConstraints | None = None,
+        progress: Progress | None = None,
     ) -> Result:
         """Создаёт новую адресуемую версию, сохраняя предыдущую.
 
@@ -163,43 +152,32 @@ class Planner:
         :param days: Число относительных дней
         :param limits: Обязательные явные пределы
         :param context: Персональный контекст
+        :param progress: Этапы для интерфейса текущего вызова
         :param usage: Общий счётчик вызовов
         :return: План, черновик либо техническая ошибка
         """
         previous = await self.store.replay(user_id, operation_id)
         if previous:
             return previous
-        diagnostics = []
-        if self.retriever is not None and self.candidate_strategy == "retrieval":
-            selected = await self.retriever.select(
-                request, context, constraints, for_plan=True, days=days, limits=limits
-            )
-            diagnostics = [d.model_dump() for d in selected.diagnostics]
-            index = await self.catalog.recipes_by_ids(selected.recipe_ids)
-            recipes = [index[rid] for rid in selected.recipe_ids if rid in index]
-            if not recipes:
-                return Result.failed(
-                    "NO_SUITABLE_RECIPES",
-                    "Не найдены подтверждённые рецепты по условиям. "
-                    + " ".join(d["message"] for d in diagnostics),
-                )
-        else:
+        progress = progress or Progress()
+        await progress.report("plan_prepare")
+        with stage("plan.catalog"):
             recipes = await self.catalog.all()
         if not recipes:
             return Result.failed("EMPTY_CATALOG", "Подготовленный каталог пуст; требуется импорт рецептов")
         products = await self.catalog.products()
+        index = {f"r{i}": r for i, r in enumerate(sorted(recipes, key=lambda r: r.recipe_id), 1)}
         payload = {
             "operation": "generate",
             "request": request,
             "days": days,
             "limits": limits.model_dump(mode="json"),
-            "context": context.model_dump(mode="json"),
-            "catalog": [r.planning_card(products) for r in recipes],
-            "retrieval_diagnostics": diagnostics,
-            "retrieval_constraints": constraints.model_dump(mode="json") if constraints else None,
+            "context": context.model_dump(mode="json")
+            | {"energy_reference": energy_reference(context.questionnaire)},
+            "catalog": [r.planning_card(products) | {"recipe_id": alias} for alias, r in index.items()],
         }
-        index = {r.recipe_id: r for r in recipes}
         for attempt in range(2):
+            await progress.report("plan_generate" if attempt == 0 else "plan_correct")
             try:
                 candidate = await self.generator.generate("meal_plan", PlanDraft, payload, usage, "low")
             except (UnexpectedModelBehavior, ValidationError) as exc:
@@ -213,9 +191,22 @@ class Planner:
                 }
                 payload["operation"] = "repair"
                 continue
-            metrics, issues = evaluate(candidate, index, limits)
+            await progress.report("plan_check")
+            with stage("plan.validate"):
+                metrics, issues = evaluate(candidate, index, limits)
             if not issues or attempt:
+                candidate = candidate.model_copy(
+                    update={
+                        "meals": [
+                            meal.model_copy(update={"recipe_id": index[meal.recipe_id].recipe_id})
+                            if meal.recipe_id in index
+                            else meal
+                            for meal in candidate.meals
+                        ]
+                    }
+                )
                 result = Result(status="needs_revision" if issues else "ok", issues=issues)
+                await progress.report("plan_save")
                 return await self.store.save_object(
                     user_id,
                     "plan",

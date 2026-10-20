@@ -94,3 +94,69 @@ async def test_planner_uses_projection_for_both_attempts(store, catalog):
         assert payload["catalog"][0]["ingredients"] == ["Овсянка"]
         assert payload["catalog"][0]["restrictions"] == "Овёс; отсутствие глютена не подтверждено."
     assert generator.calls[0]["catalog"] == generator.calls[1]["catalog"]
+
+
+async def test_short_ids_resolve_before_storage_and_stay_stable_during_repair(
+    store, catalog_writer, recipe, product
+):
+    easy = recipe.model_copy(update={"recipe_id": "recipe_long_a"})
+    hard = recipe.model_copy(update={"recipe_id": "recipe_long_b", "difficulty": "advanced"})
+    catalog = catalog_writer([product], [hard, easy])
+
+    class Generator:
+        def __init__(self):
+            self.calls = []
+
+        async def generate(self, prompt, schema, payload, usage, effort):
+            self.calls.append(deepcopy(payload))
+            return PlanDraft(
+                meals=[
+                    Meal(day=1, meal="Завтрак", recipe_id="r2" if len(self.calls) == 1 else "r1", servings=2)
+                ],
+                explanation="",
+            )
+
+    generator = Generator()
+    planner = Planner(store, catalog, generator)
+    args = (
+        "u",
+        "short",
+        "Меню",
+        1,
+        PlanLimits(max_difficulty="easy", budget_rub=100),
+        PersonContext(),
+        RunUsage(),
+    )
+    result = await planner.run(*args)
+    assert result.status == "ok"
+    assert [r["recipe_id"] for r in generator.calls[0]["catalog"]] == ["r1", "r2"]
+    assert generator.calls[1]["catalog"] == generator.calls[0]["catalog"]
+    assert generator.calls[1]["candidate"]["meals"][0]["recipe_id"] == "r2"
+    assert generator.calls[1]["feedback"][0]["code"] == "DIFFICULTY_EXCEEDED"
+    assert result.data["meals"][0]["recipe_id"] == easy.recipe_id
+    assert result.data["totals"]["kcal"] == 360
+    assert (await catalog.get([easy.recipe_id])).data["recipes"][0]["recipe_id"] == easy.recipe_id
+    assert await planner.run(*args) == result
+    assert len(generator.calls) == 2
+
+
+async def test_unknown_short_id_is_not_guessed(store, catalog):
+    class Generator:
+        async def generate(self, prompt, schema, payload, usage, effort):
+            return PlanDraft(
+                meals=[Meal(day=1, meal="Завтрак", recipe_id="r999", servings=1)], explanation=""
+            )
+
+    result = await Planner(store, catalog, Generator()).run(
+        "u",
+        "unknown-alias",
+        "Меню",
+        1,
+        PlanLimits(max_difficulty=None, budget_rub=None),
+        PersonContext(),
+        RunUsage(),
+    )
+    assert result.status == "needs_revision"
+    assert result.issues[0].code == "RECIPE_NOT_FOUND"
+    assert result.issues[0].actual == "r999"
+    assert result.data["totals"]["kcal"] == 0

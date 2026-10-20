@@ -1,14 +1,19 @@
+import asyncio
 import gzip
 import hashlib
 import json
+import math
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiosqlite
+from loguru import logger
 
-from app.models import NormalizedProduct, Recipe, Result
+from app.integrations import IntegrationError, parse_product
+from app.models import NormalizedProduct, Product, Recipe, RecipeSearchLimits, Result
+from app.retrieval.features import RecipeFilter
 
 
 class Catalog:
@@ -104,6 +109,63 @@ class Catalog:
             ).fetchone()
         return json.loads(row["evidence"]) if row else None
 
+    async def enrich_skus(self, products: list[Product]) -> list[Product]:
+        """Дополняет неизвестную фасовку принятыми наблюдениями того же SKU.
+
+        Цена магазина и явные единицы не заменяются. Противоречивые наблюдения
+        не разрешаются догадкой; граммы, миллилитры и штуки не конвертируются.
+        :param products: Живые или кэшированные кандидаты
+        :return: Карточки с источником дополненной фасовки
+        """
+        ids = [p.sku_id for p in products if p.package_amount is None and p.sale_unit is None]
+        if not ids:
+            return products
+        async with self.connection() as db:
+            rows = await (
+                await db.execute(
+                    "SELECT o.value, f.key AS kind FROM product_directory d, json_each(d.evidence) f, "
+                    "json_each(f.value) o "
+                    "JOIN product_skus s ON s.product_id=d.product_id AND s.sku_id=json_extract(o.value,'$.sku_id') "
+                    "WHERE f.key IN ('price_observations','package_observations') "
+                    "AND s.sku_id IN (SELECT value FROM json_each(?)) ORDER BY f.key DESC",
+                    (json.dumps(ids),),
+                )
+            ).fetchall()
+        observations: dict[str, dict[tuple[float, str], str]] = {}
+        explicit = set()
+        for row in rows:
+            value = json.loads(row["value"])
+            sku_id = value["sku_id"]
+            amount, unit, basis = value.get("package_amount"), value.get("package_unit"), value.get("basis")
+            if (
+                type(amount) in (int, float)
+                and math.isfinite(amount)
+                and amount > 0
+                and unit in {"g", "ml", "pcs"}
+                and isinstance(basis, str)
+                and basis
+            ):
+                if row["kind"] == "package_observations" and sku_id not in explicit:
+                    # Прямая проверка фасовки уточняет старую базу расчёта цены.
+                    observations[sku_id] = {}
+                    explicit.add(sku_id)
+                observations.setdefault(sku_id, {})[(amount, unit)] = basis
+        result = []
+        for product in products:
+            facts = observations.get(product.sku_id, {})
+            if product.package_amount is None and product.sale_unit is None and len(facts) == 1:
+                (amount, unit), basis = next(iter(facts.items()))
+                if product.package_unit in (None, unit):
+                    product = product.model_copy(
+                        update={
+                            "package_amount": amount,
+                            "package_unit": unit,
+                            "package_basis": f"Справочник SKU: {basis}",
+                        }
+                    )
+            result.append(product)
+        return result
+
     async def source_skus(self, product_id: str) -> list[dict]:
         """Возвращает связанные карточки в исходном формате MCP ВкусВилла.
 
@@ -119,6 +181,33 @@ class Catalog:
                 )
             ).fetchall()
         return [json.loads(r["payload"]) for r in rows]
+
+    async def linked_skus(self, product_id: str) -> list[Product]:
+        """Адаптирует принятые связи, сохраняя дату снимка цены, а не дату чтения.
+
+        :param product_id: Нормализованный продукт
+        :return: Кандидаты с достоверной ценой и источником; некорректные пропускаются
+        """
+        async with self.connection() as db:
+            row = await (
+                await db.execute("SELECT value FROM source_data.metadata WHERE key='snapshot_date'")
+            ).fetchone()
+        date = row["value"] if row else None
+        result = []
+        for raw in await self.source_skus(product_id):
+            try:
+                sku = parse_product(raw)
+            except IntegrationError:
+                continue
+            result.append(
+                sku.model_copy(
+                    update={
+                        "price_source": "Каталог SKU ВкусВилла",
+                        "price_observed_at": date,
+                    }
+                )
+            )
+        return result
 
     async def all(self) -> list[Recipe]:
         """Возвращает весь каталог без токенового усечения.
@@ -198,10 +287,11 @@ class Catalog:
             recipes.append(data)
         return Result(data={"recipes": recipes})
 
-    async def search(self, query: str) -> Result:
-        """Возвращает не более десяти карточек по одному запросу.
+    async def search(self, query: str, limits: RecipeSearchLimits) -> Result:
+        """Выполняет резервный FTS-поиск с общей фильтрацией до top-k.
 
         :param query: Конкретное блюдо или сочетание ингредиентов
+        :param limits: Явные ограничения без подстановки профиля
         :return: Карточки без технических сведений поискового движка
         """
         words = re.findall(r"[\w]+", query.lower(), flags=re.UNICODE)
@@ -212,11 +302,20 @@ class Catalog:
             rows = await (
                 await db.execute(
                     "SELECT r.payload FROM recipe_fts f JOIN recipes r ON r.recipe_id=f.recipe_id "
-                    "WHERE recipe_fts MATCH ? ORDER BY rank LIMIT 10",
+                    "WHERE recipe_fts MATCH ? ORDER BY rank,r.recipe_id",
                     (expression,),
                 )
             ).fetchall()
+            aliases = dict(
+                await (await db.execute("SELECT alias,product_id FROM product_aliases")).fetchall()
+            )
         products = await self.products()
-        return Result(
-            data={"recipes": [Recipe.model_validate(json.loads(r["payload"])).card(products) for r in rows]}
-        )
+        recipes = [Recipe.model_validate_json(r["payload"]) for r in rows]
+        if any(value is not None for value in limits.model_dump().values()):
+            filters = await asyncio.to_thread(
+                RecipeFilter, {r.recipe_id: r for r in recipes}, products, aliases
+            )
+            allowed, diagnostics = filters.apply(limits)
+            recipes = [r for r in recipes if r.recipe_id in allowed]
+            logger.bind(diagnostics=diagnostics, candidates=len(recipes)).info("Catalog search filtered")
+        return Result(data={"recipes": [r.card(products) for r in recipes[:10]]})

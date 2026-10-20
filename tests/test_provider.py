@@ -20,12 +20,17 @@ async def test_wire_schema_nested_budget_usage_and_private_catalog(
         payload = json.loads(request.content)
         requests.append(payload)
         if len(requests) == 1:
-            assert payload["model"] == "z-ai/glm-5.3-flash"
-            assert payload["provider"]["only"] == ["OpenInference"]
+            assert payload["model"] == "openai/gpt-6-luna"
+            assert payload["provider"]["only"] == ["openai"]
+            assert payload["reasoning"]["effort"] == "medium"
             definition = next(
                 t["function"] for t in payload["tools"] if t["function"]["name"] == "generate_plan"
             )
             assert "$ref" not in json.dumps(definition)
+            cart = next(t for t in payload["tools"] if t["function"]["name"] == "create_cart")
+            assert cart["function"]["strict"] is True
+            assert "oneOf" not in json.dumps(cart)
+            assert "anyOf" in cart["function"]["parameters"]["properties"]["source"]
             assert definition["parameters"]["properties"]["limits"]["type"] == "object"
             message = {
                 "role": "assistant",
@@ -68,7 +73,7 @@ async def test_wire_schema_nested_budget_usage_and_private_catalog(
                 ),
             }
         else:
-            assert payload["model"] == "z-ai/glm-5.3-flash"
+            assert payload["model"] == "openai/gpt-6-luna"
             assert '"catalog":' not in json.dumps(payload, ensure_ascii=False)
             message = {"role": "assistant", "content": "План сохранён."}
         return httpx.Response(
@@ -216,8 +221,58 @@ async def test_planning_correction_uses_luna_but_editing_and_compaction_use_chat
         await gateway.generate("edit_plan", PlanDraft, {}, usage)
         await gateway.compact({}, usage, request_limit=4)
     assert [r["model"] for r in requests] == [config.planning_model] * 2 + [config.model] * 2
-    assert [r["reasoning"]["effort"] for r in requests] == ["medium", "medium", "low", "low"]
-    assert [r["provider"]["only"] for r in requests] == [["openai"]] * 2 + [["OpenInference"]] * 2
+    assert [r["reasoning"]["effort"] for r in requests] == ["medium", "medium", "low", "medium"]
+    assert [r["provider"]["only"] for r in requests] == [["openai"]] * 4
     assert all(not r.get("tools") for r in requests)
     assert usage.requests == 4
     assert usage.details["cost_nano_usd"] == 4_000_000
+
+
+async def test_stream_preserves_separate_encrypted_reasoning_items_for_continuation() -> None:
+    from pydantic_ai import Agent
+
+    requests = []
+    details = [
+        {"type": "reasoning.summary", "summary": "Первая часть", "index": 0},
+        {"type": "reasoning.encrypted", "id": "rs_first", "data": "cipher-first", "index": 1},
+        {"type": "reasoning.summary", "summary": "Вторая часть", "index": 2},
+        {"type": "reasoning.encrypted", "id": "rs_second", "data": "cipher-second", "index": 3},
+    ]
+    for detail in details:
+        detail["format"] = "openai-responses-v1"
+        detail.setdefault("id", None)
+
+    def response(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 2:
+            previous = next(m for m in payload["messages"] if m["role"] == "assistant")
+            assert previous["reasoning_details"] == details
+        chunks = []
+        for detail in details if len(requests) == 1 else []:
+            chunks.append({"delta": {"reasoning_details": [detail]}, "finish_reason": None})
+        chunks.append({"delta": {"content": "Готово"}, "finish_reason": "stop"})
+        body = ""
+        for choice in chunks:
+            chunk = {
+                "id": "gen-test",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": payload["model"],
+                "provider": "OpenAI",
+                "choices": [{"index": 0, **choice}],
+            }
+            body += "data: " + json.dumps(chunk) + "\n\n"
+        return httpx.Response(
+            200, text=body + "data: [DONE]\n\n", headers={"Content-Type": "text/event-stream"}
+        )
+
+    async def consume(_, events):
+        async for _ in events:
+            pass
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+        agent = Agent(build_model(Config(_env_file=None, openrouter_api_key="test"), client))
+        first = await agent.run("Первый", event_stream_handler=consume)
+        await agent.run("Продолжи", message_history=first.new_messages(), event_stream_handler=consume)
+    assert len(requests) == 2

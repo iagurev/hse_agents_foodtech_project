@@ -7,6 +7,7 @@ from pydantic_ai.usage import RunUsage
 from app.assistant.tools import build_toolset
 from app.models import Meal, PersonContext, PlanDraft, PlanLimits, PlanRevision
 from app.planning import Planner, evaluate
+from app.progress import Progress
 
 
 class ScriptedGenerator:
@@ -37,6 +38,7 @@ def test_tool_contracts() -> None:
     for name in ("list_plans", "list_carts"):
         assert tools[name].function_schema.json_schema["properties"] == {}
     schema = tools["generate_plan"].function_schema.json_schema
+    assert set(schema["properties"]) == {"request", "days", "limits"}
     assert schema["required"] == ["request", "days", "limits"]
     assert schema["$defs"]["PlanLimits"]["required"] == ["max_difficulty", "budget_rub"]
     with pytest.raises(ValidationError):
@@ -68,7 +70,22 @@ async def test_one_repair_full_catalog_and_preserved_limits(store, catalog) -> N
     generator = ScriptedGenerator([draft("unknown"), draft("still_missing")])
     planner = Planner(store, catalog, generator)
     limits = PlanLimits(max_difficulty="easy", budget_rub=50.0)
-    result = await planner.run("u", "operation", "Запрос", 7, limits, PersonContext(), RunUsage())
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    result = await planner.run(
+        "u", "operation", "Запрос", 7, limits, PersonContext(), RunUsage(), progress=Progress(emit)
+    )
+    assert [e["stage"] for e in events] == [
+        "plan_prepare",
+        "plan_generate",
+        "plan_check",
+        "plan_correct",
+        "plan_check",
+        "plan_save",
+    ]
     assert result.status == "needs_revision"
     assert result.data["plan_id"]
     assert len(generator.calls) == 2
@@ -174,8 +191,8 @@ async def test_format_repair_counts_towards_two_calls(store, catalog) -> None:
     assert len(generator.calls) == 2
 
 
-async def test_catalog_search_and_batch(catalog, recipe) -> None:
-    result = await catalog.search("овсян")
+async def test_catalog_search_and_batch(catalog, recipe, no_recipe_limits) -> None:
+    result = await catalog.search("овсян", no_recipe_limits)
     assert result.data["recipes"][0]["recipe_id"] == recipe.recipe_id
     details = await catalog.get(["r1", "missing", "r1"])
     assert len(details.data["recipes"]) == 1
@@ -208,21 +225,26 @@ def test_plan_budget_five_percent_tolerance(recipe, mean, exceeded):
 def test_fixed_search_schemas_and_plan_output():
     tools = build_toolset().tools
     for name, argument in [
-        ("search_recipes", "query"),
         ("search_products", "query"),
         ("get_product_analogs", "sku_id"),
     ]:
         schema = tools[name].function_schema.json_schema
-        assert set(schema["properties"]) == (
-            {argument, "constraints"} if name == "search_recipes" else {argument}
-        )
+        assert set(schema["properties"]) == {argument}
+    schema = tools["search_recipes"].function_schema.json_schema
+    assert set(schema["properties"]) == {"query", "limits"}
+    assert set(schema["required"]) == {"query", "limits"}
+    fields = schema["$defs"]["RecipeSearchLimits"]
+    assert set(fields["required"]) == set(fields["properties"])
+    assert all("description" in value for value in fields["properties"].values())
     assert set(PlanDraft.model_json_schema()["properties"]) == {"meals", "explanation"}
 
 
-async def test_recipe_projection_photos_and_fixed_top_ten(store, catalog, recipe, product, catalog_writer):
+async def test_recipe_projection_photos_and_fixed_top_ten(
+    store, catalog, recipe, product, catalog_writer, no_recipe_limits
+):
     recipes = [recipe.model_copy(update={"recipe_id": f"r{i}"}) for i in range(15)]
     catalog = catalog_writer([product], recipes)
-    result = await catalog.search("каша")
+    result = await catalog.search("каша", no_recipe_limits)
     assert set(result.data) == {"recipes"}
     assert len(result.data["recipes"]) == 10
     card = result.data["recipes"][0]
@@ -235,7 +257,7 @@ async def test_recipe_projection_photos_and_fixed_top_ten(store, catalog, recipe
     assert full["image_url"] == recipe.image_url
     assert full["ingredients"][0] == {"product_id": "oats", "amount": 50.0, "name": "Овсянка", "unit": "g"}
     assert not {"techniques", "composition", "provenance", "estimates"} & full.keys()
-    assert (await catalog.search("!!!")).data == {"recipes": []}
+    assert (await catalog.search("!!!", no_recipe_limits)).data == {"recipes": []}
     generator = ScriptedGenerator([draft()])
     await Planner(store, catalog, generator).run(
         "u",

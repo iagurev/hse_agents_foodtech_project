@@ -28,7 +28,11 @@ export async function api<T>(path: string, method = 'GET', body?: unknown): Prom
   return data as T;
 }
 export const errorText = (error: unknown) =>
-  error instanceof Error ? error.message : 'Не удалось выполнить действие';
+  error instanceof TypeError
+    ? 'Не удалось связаться с сервером. Проверьте соединение и попробуйте ещё раз.'
+    : error instanceof Error
+      ? error.message
+      : 'Не удалось выполнить действие';
 export const money = (value?: number | null) =>
   value == null ? 'Цена неизвестна' : `${Math.round(value).toLocaleString('ru-RU')} ₽`;
 export const number = (value?: number | null, maximumFractionDigits = 1) =>
@@ -36,6 +40,10 @@ export const number = (value?: number | null, maximumFractionDigits = 1) =>
 export const go = (path: string) => {
   window.location.hash = path;
 };
+export const detailPath = (path: string, from = location.hash.slice(1) || '/chat') =>
+  `${path}${path.includes('?') ? '&' : '?'}from=${encodeURIComponent(from)}`;
+export const openDetail = (path: string) => go(detailPath(path));
+
 export type Difficulty = 'easy' | 'intermediate' | 'advanced';
 export const difficulties = { easy: 'Простая', intermediate: 'Средняя', advanced: 'Высокая' };
 export const budgets = ['15-20', '20-25', '25-30', '30-35', '35-40', '40-50', 'unlimited'] as const;
@@ -48,12 +56,19 @@ export const goals = {
   gain_mass: 'Набрать массу',
   ideas: 'Понять, что готовить',
 };
+export const activities = {
+  inactive: ['Мало движения', 'В основном сидячий день, обычные бытовые дела'],
+  low_active: ['Немного движения', 'Бытовые дела и регулярные прогулки'],
+  active: ['Много движения', 'Подвижный день и заметная физическая нагрузка'],
+  very_active: ['Очень много движения', 'Тяжёлая физическая работа или длительные интенсивные тренировки'],
+} as const;
 export interface Profile {
   goal: keyof typeof goals;
   sex: 'female' | 'male';
   age: number;
   height_cm: number;
   weight_kg: number;
+  activity: keyof typeof activities | null;
   monthly_budget: string | null;
   cooking_difficulty: Difficulty | null;
   restrictions: string;
@@ -85,9 +100,18 @@ export type RecipeSummary = Pick<
   Recipe,
   'recipe_id' | 'title' | 'image_url' | 'total_minutes' | 'difficulty' | 'cost'
 >;
+export interface RecipeSearchLimits {
+  exclude_products: string[] | null;
+  forbidden_equipment: string[] | null;
+  max_total_minutes: number | null;
+  max_difficulty: 'easy' | 'intermediate' | 'advanced' | null;
+  meal_roles: ('breakfast' | 'lunch' | 'dinner' | 'snack' | 'dessert')[] | null;
+  diet: 'vegetarian' | 'vegan' | null;
+  budget_rub: number | null;
+}
+
 export interface RecipeSearchData {
   recipes: RecipeSummary[];
-  diagnostics: { code: string; message: string }[];
 }
 export interface Totals {
   kcal: number;
@@ -102,7 +126,11 @@ export interface Meal {
   recipe_id: string;
   servings: number;
 }
-export interface Plan {
+export interface ObjectMeta {
+  title: string;
+  hidden: boolean;
+}
+export interface Plan extends ObjectMeta {
   plan_id: string;
   parent_id: string | null;
   days: number;
@@ -115,9 +143,14 @@ export interface Plan {
 export interface Item {
   sku_id: string;
   packages: number;
-  product: { title: string; price_rub: number; source_url?: string } | null;
+  product: {
+    title: string;
+    price_rub: number | null;
+    source_url?: string;
+    sale_unit?: 'kg' | 'l' | null;
+  } | null;
 }
-export interface Cart {
+export interface Cart extends ObjectMeta {
   cart_id: string;
   parent_id: string | null;
   items: Item[];
@@ -130,6 +163,7 @@ export interface Cart {
   subtotal_rub: number | null;
   total_is_complete: boolean;
   cart_url: string | null;
+  cart_links?: { sku_ids: string[]; url: string | null; error: string | null }[];
   link_error: string | null;
 }
 export interface Result<T> {
@@ -147,19 +181,55 @@ export interface Artifact {
   image_url?: string;
   total?: number;
   cost?: number;
+  base_serving?: string;
+  selectable?: boolean;
+  minutes?: number;
+  kcal?: number;
+  hidden?: boolean;
+}
+export interface OperationProgress {
+  name: string;
+  call_id?: string | null;
+  stage?: string;
+  completed?: number;
+  total?: number;
+  found?: number;
 }
 export interface Turn {
   turn_id: string;
   text: string;
+  references?: ObjectReference[];
   output: string;
   state: string;
   artifacts: Artifact[];
   tool?: string | null;
+  progress?: OperationProgress | null;
+  elapsed_seconds?: number | null;
+  elapsed_is_partial?: boolean;
 }
+export interface ObjectReference {
+  kind: 'plan' | 'cart' | 'recipe';
+  id: string;
+  title?: string;
+  servings?: number;
+}
+export interface ChatDraft {
+  text: string;
+  references: ObjectReference[];
+}
+export type Discuss = (text: string, references?: ObjectReference[]) => void;
 export interface Chat {
   chat_id: string;
   title: string;
   active: boolean;
+}
+export function duration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  return [hours ? `${hours} ч` : '', hours || minutes ? `${minutes} мин` : '', `${total % 60} с`]
+    .filter(Boolean)
+    .join(' ');
 }
 export const isActive = (state: string) => ['queued', 'guarding', 'running'].includes(state);
 

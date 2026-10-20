@@ -2,7 +2,15 @@ import re
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 Difficulty = Literal["easy", "intermediate", "advanced"]
 Number = Annotated[float, Field(strict=True, allow_inf_nan=False)]
@@ -28,6 +36,34 @@ class CartLimits(Record):
     )
 
 
+class RecipeSearchLimits(Record):
+    """Явные фильтры поиска; каждое поле обязательно, null снимает ограничение."""
+
+    exclude_products: list[str] | None = Field(
+        max_length=30,
+        description="Исключённые ингредиенты: названия общих продуктов или product_id; null — без исключений",
+    )
+    forbidden_equipment: list[str] | None = Field(
+        max_length=20, description="Недоступная техника, например духовка или блендер; null — без исключений"
+    )
+    max_total_minutes: Number | None = Field(
+        gt=0, description="Максимальное общее время приготовления в минутах; null — без предела"
+    )
+    max_difficulty: Difficulty | None = Field(
+        description="Максимальная сложность приготовления; null — без предела"
+    )
+    meal_roles: list[Literal["breakfast", "lunch", "dinner", "snack", "dessert"]] | None = Field(
+        description="Явно заданные пользователем приёмы пищи: достаточно одного совпадения; null, если не уточнялись"
+    )
+    diet: Literal["vegetarian", "vegan"] | None = Field(
+        description="Исключить известные животные ингредиенты по типу питания; null — без фильтра"
+    )
+    budget_rub: Number | None = Field(
+        ge=0,
+        description="Бюджет одной базовой порции в рублях без прибавки 5%; сравнивается средняя оценка цены; null — без предела",
+    )
+
+
 class Nutrition(Record):
     kcal: Number = Field(description="Килокалории")
     protein_g: Number = Field(description="Белки, г")
@@ -41,6 +77,14 @@ class Cost(Record):
     max_rub: Number = Field(description="Верхняя оценка цены, рубли")
 
 
+class UnitConversion(Record):
+    """Справочная оценка: сколько единиц продукта в одной иной единице фасовки."""
+
+    factor: Number = Field(gt=0, description="Количество единиц нормализованного продукта в единице фасовки")
+    source_url: str = Field(description="Проверенный источник справочного коэффициента")
+    note: str = Field(description="Область применения и оценочный характер пересчёта")
+
+
 class NormalizedProduct(Record):
     """Общий продукт; показатели относятся к base_amount в указанной единице."""
 
@@ -51,6 +95,7 @@ class NormalizedProduct(Record):
     nutrition: Nutrition | None
     cost: Cost | None
     restrictions: str
+    conversions: dict[Literal["g", "ml", "pcs"], UnitConversion] = Field(default_factory=dict)
 
 
 class Ingredient(Record):
@@ -232,11 +277,14 @@ class RecipesSource(Record):
 
 
 class SkuAmount(Record):
-    """Явно выбранный товар; количество задаётся целыми упаковками."""
+    """Количество единиц продажи: целые упаковки либо дробные кг/л."""
 
     sku_id: str = Field(min_length=1, description="Конкретный SKU магазина, не product_id ингредиента")
-    packages: Annotated[int, Field(strict=True, gt=0)] = Field(
-        default=1, description="Количество упаковок; если не указано, одна упаковка"
+    packages: Number = Field(
+        default=1,
+        gt=0,
+        multiple_of=0.01,
+        description="Количество единиц продажи: целые упаковки, для весового SKU кг/л с шагом 0.01; по умолчанию 1",
     )
 
 
@@ -305,7 +353,10 @@ class SkuCartRevision(Record):
 class Product(Record):
     sku_id: str = Field(description="Идентификатор конкретного товара магазина")
     title: str = Field(description="Название товара из интеграции")
-    price_rub: Number = Field(description="Цена одной упаковки в рублях")
+    price_rub: Number = Field(description="Цена единицы продажи: упаковки либо кг/л, в рублях")
+    sale_unit: Literal["kg", "l"] | None = Field(
+        default=None, description="kg/l для продажи на вес/объём; null — целая упаковка"
+    )
     package_amount: Number | None = Field(
         default=None, description="Количество в упаковке; null — неизвестно"
     )
@@ -313,6 +364,20 @@ class Product(Record):
     source_url: str | None = Field(default=None, description="Ссылка на товар при наличии")
     composition: str | None = Field(default=None, description="Состав, возвращённый магазином, если доступен")
     package_basis: str | None = Field(default=None, description="Источник данных о фасовке")
+    price_source: str | None = Field(default=None, description="Источник цены: MCP либо снимок каталога")
+    price_observed_at: str | None = Field(default=None, description="Дата получения цены из источника")
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_sale_unit(cls, data: object) -> object:
+        """Читает единицу продажи из точной метки прежних сохранённых карточек."""
+        if isinstance(data, dict) and "sale_unit" not in data:
+            unit = {"Единица продажи MCP: кг": "kg", "Единица продажи MCP: л": "l"}.get(
+                data.get("package_basis")
+            )
+            if unit:
+                return data | {"sale_unit": unit}
+        return data
 
 
 class Choice(Record):

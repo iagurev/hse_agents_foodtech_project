@@ -1,6 +1,6 @@
 import asyncio
 import time
-from collections.abc import AsyncIterable, Awaitable, Callable
+from collections.abc import AsyncIterable
 from uuid import uuid4
 
 from loguru import logger
@@ -31,11 +31,10 @@ from app.config import Config
 from app.integrations import Products
 from app.llm import Generator
 from app.planning import Planner
+from app.progress import EventSink
 from app.retrieval.service import RecipeRetriever
 from app.shopping import Shopper
 from app.storage import Store
-
-EventSink = Callable[[dict[str, JsonValue]], Awaitable[None]]
 
 
 class Session:
@@ -56,7 +55,7 @@ class Session:
         self.products, self.generator, self.counter = products, generator, counter
         self.retriever = retriever
         self.planner, self.shopper = (
-            Planner(store, catalog, generator, retriever, config.planning_candidate_strategy),
+            Planner(store, catalog, generator),
             Shopper(store, catalog, products, generator),
         )
         self.locks: dict[str, asyncio.Lock] = {}
@@ -141,6 +140,7 @@ class Session:
                 summary,
                 compaction,
                 self.retriever,
+                emit,
             )
             usage = usage if usage is not None else RunUsage()
             started = time.monotonic()
@@ -154,12 +154,19 @@ class Session:
                     if emit is None:
                         continue
                     if isinstance(event, FunctionToolCallEvent):
-                        await emit({"type": "tool_start", "name": event.part.tool_name})
+                        await emit(
+                            {
+                                "type": "tool_start",
+                                "name": event.part.tool_name,
+                                "call_id": event.part.tool_call_id,
+                            }
+                        )
                     elif isinstance(event, FunctionToolResultEvent):
                         await emit(
                             {
                                 "type": "tool_end",
                                 "name": event.result.tool_name,
+                                "call_id": event.result.tool_call_id,
                                 "content": event.result.content.model_dump(mode="json")
                                 if hasattr(event.result.content, "model_dump")
                                 else event.result.content,

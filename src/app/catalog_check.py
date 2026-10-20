@@ -29,24 +29,26 @@ async def check_catalog(catalog: Catalog, documents: bool = True) -> dict:
                 raise ValueError(f"Неизвестный продукт рецепта {recipe.recipe_id}")
             if ingredient.amount <= 0:
                 raise ValueError(f"Неположительное количество в {recipe.recipe_id}")
+            product = products[ingredient.product_id]
+            if product.nutrition is None or product.cost is None:
+                raise ValueError(f"Неполные показатели продукта в {recipe.recipe_id}")
             ingredient_rows += 1
-        if recipe.recipe_id.startswith("recipe_adapt_vv_"):
-            for field, keys in [
-                ("nutrition", ["kcal", "protein_g", "fat_g", "carbs_g"]),
-                ("cost", ["mean_rub", "min_rub", "max_rub"]),
-            ]:
-                for key in keys:
-                    target = sum(
-                        i.amount
-                        * getattr(getattr(products[i.product_id], field), key)
-                        / products[i.product_id].base_amount
-                        for i in recipe.ingredients
-                    )
-                    tolerance = 0.5 if field == "nutrition" else 0.005
-                    if not math.isclose(
-                        getattr(getattr(recipe, field), key), target, rel_tol=0, abs_tol=tolerance + 1e-8
-                    ):
-                        raise ValueError(f"Ошибка расчёта {field}.{key}: {recipe.recipe_id}")
+        for field, keys in [
+            ("nutrition", ["kcal", "protein_g", "fat_g", "carbs_g"]),
+            ("cost", ["mean_rub", "min_rub", "max_rub"]),
+        ]:
+            for key in keys:
+                target = sum(
+                    i.amount
+                    * getattr(getattr(products[i.product_id], field), key)
+                    / products[i.product_id].base_amount
+                    for i in recipe.ingredients
+                )
+                tolerance = 0.5 if field == "nutrition" else 0.005
+                if not math.isclose(
+                    getattr(getattr(recipe, field), key), target, rel_tol=0, abs_tol=tolerance + 1e-8
+                ):
+                    raise ValueError(f"Ошибка расчёта {field}.{key}: {recipe.recipe_id}")
     async with catalog.connection() as db:
         for schema in ["main", "product_data", "source_data"]:
             if (await (await db.execute(f"PRAGMA {schema}.integrity_check")).fetchone())[0] != "ok":
@@ -69,7 +71,17 @@ async def check_catalog(catalog: Catalog, documents: bool = True) -> dict:
                         raise ValueError(
                             f"Единица наблюдения {field} не соответствует продукту {product.product_id}"
                         )
+                    if observation.get("base_amount") != product.base_amount:
+                        raise ValueError(
+                            f"База наблюдения {field} не соответствует продукту {product.product_id}"
+                        )
                     observations_checked += 1
+            supplement = evidence.get("nutrition_supplement")
+            if supplement and (
+                supplement.get("nutrition_unit") != product.unit
+                or supplement.get("nutrition_base_amount") != product.base_amount
+            ):
+                raise ValueError(f"База справочного КБЖУ не соответствует продукту {product.product_id}")
         for query, expected in [
             ("SELECT recipe_id FROM recipe_fts", {r.recipe_id for r in recipes}),
             ("SELECT product_id FROM product_fts", active),
