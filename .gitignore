@@ -21,10 +21,7 @@ dist/
 node_modules/
 frontend/dist/
 *.tsbuildinfo
-/docs/memory/
-/docs/plans/
 /docs/skills/
-/docs/specs/
 
 # Only the three published catalogue databases belong in data.
 data/*
