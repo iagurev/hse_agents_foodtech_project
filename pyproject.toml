@@ -14,8 +14,6 @@ dependencies = [
   "aiosqlite>=0.21,<1",
   "httpx>=0.28,<1",
   "loguru>=0.7,<1",
-  "tokenizers>=0.22,<0.24",
-  "jinja2>=3.1,<4",
   "fastapi>=0.115,<1",
   "uvicorn>=0.34,<1",
   "argon2-cffi>=23,<26",
@@ -31,7 +29,7 @@ dependencies = [
 dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.12,<1"]
 
 [project.scripts]
-meal-rag = "app.retrieval.__main__:main"
+meal-rag = "app.catalog.search.__main__:main"
 meal-app = "app.web.server:main"
 nutrition-assistant = "app.assistant.__main__:main"
 

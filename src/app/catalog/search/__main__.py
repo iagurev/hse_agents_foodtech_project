@@ -5,10 +5,10 @@ import statistics
 import time
 from pathlib import Path
 
-from app.catalog import Catalog
+from app.catalog.search.service import RecipeRetriever
+from app.catalog.store import Catalog
 from app.config import get_config
 from app.models import RecipeSearchLimits
-from app.retrieval.service import RecipeRetriever
 
 
 async def execute(args: argparse.Namespace) -> None:

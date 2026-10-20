@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.catalog import Catalog
+from app.catalog.store import Catalog
 from app.models import Cost, Ingredient, NormalizedProduct, Nutrition, Recipe, RecipeSearchLimits
 from app.storage import Store
 

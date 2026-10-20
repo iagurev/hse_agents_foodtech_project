@@ -7,11 +7,11 @@ import pytest
 from pydantic_ai.usage import RunUsage
 
 from app.assistant.tools import RecipeSearchResult
+from app.catalog.search.features import equipment_features
+from app.catalog.search.service import RecipeRetriever
 from app.config import Config
 from app.models import PersonContext, PlanLimits, RecipeSearchLimits
-from app.planning import Planner
-from app.retrieval.features import equipment_features
-from app.retrieval.service import RecipeRetriever
+from app.planning.service import Planner
 
 
 def limits(**changes):
@@ -256,7 +256,7 @@ async def test_web_without_api_key_still_serves_local_search(retrieval, store, m
     async def prepare(catalog, config):
         return retriever
 
-    monkeypatch.setattr("app.web.server.create_retriever", prepare)
+    monkeypatch.setattr("app.web.lifespan.create_retriever", prepare)
     config = retriever.config.model_copy(update={"openrouter_api_key": None})
     app = create_app(config, store=WebStore(store.path), catalog=retriever.catalog)
     async with app.router.lifespan_context(app):

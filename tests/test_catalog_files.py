@@ -5,8 +5,8 @@ import sqlite3
 
 import pytest
 
-from app.catalog import Catalog
-from app.catalog_check import check_catalog
+from app.catalog.check import check_catalog
+from app.catalog.store import Catalog
 
 
 async def test_three_file_catalog_is_readonly_and_state_is_separate(catalog, store) -> None:

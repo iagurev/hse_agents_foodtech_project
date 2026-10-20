@@ -3,10 +3,10 @@ import asyncio
 from fastapi import HTTPException
 from pydantic import JsonValue
 
-from app.catalog import Catalog
-from app.integrations import IntegrationError
+from app.catalog.store import Catalog
+from app.integrations.vkusvill import IntegrationError
 from app.models import CartLimits, PlanDraft, PlanLimits, Result, SkuAmount, StoredSkusSource
-from app.planning import evaluate
+from app.planning.calculations import evaluate
 from app.shopping.service import Shopper
 from app.web.contracts import CartEdit, PlanEdit
 from app.web.storage import WebStore

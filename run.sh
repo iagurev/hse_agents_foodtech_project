@@ -14,7 +14,7 @@ for database in data/recipes.sqlite data/products.sqlite data/sources.sqlite; do
 done
 
 uv sync --locked
-uv run python -m app.catalog_check
+uv run python -m app.catalog.check
 if [[ ! -d frontend/node_modules ]]; then
   pnpm --dir frontend install --frozen-lockfile
 fi

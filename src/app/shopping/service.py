@@ -8,9 +8,9 @@ from pydantic import JsonValue, TypeAdapter, ValidationError
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import RunUsage
 
-from app.catalog import Catalog
-from app.integrations import CART_SKU_LIMIT, IntegrationError, Products
-from app.llm import Generator
+from app.catalog.store import Catalog
+from app.integrations.vkusvill import CART_SKU_LIMIT, IntegrationError, Products
+from app.llm.gateway import Generator
 from app.models import (
     CartLimits,
     CartProduct,

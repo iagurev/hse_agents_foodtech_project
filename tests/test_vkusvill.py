@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from app.integrations import IntegrationError, Vkusvill, parse_product
+from app.integrations.vkusvill import IntegrationError, Vkusvill, parse_product
 
 
 @pytest.fixture

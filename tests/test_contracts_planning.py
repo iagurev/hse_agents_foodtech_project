@@ -6,7 +6,8 @@ from pydantic_ai.usage import RunUsage
 
 from app.assistant.tools import build_toolset
 from app.models import Meal, PersonContext, PlanDraft, PlanLimits, PlanRevision
-from app.planning import Planner, evaluate
+from app.planning.calculations import evaluate
+from app.planning.service import Planner
 from app.progress import Progress
 
 

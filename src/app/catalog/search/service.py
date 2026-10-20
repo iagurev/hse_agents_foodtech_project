@@ -8,12 +8,12 @@ from dataclasses import dataclass
 import numpy as np
 from loguru import logger
 
-from app.catalog import Catalog
+from app.catalog.search.encoder import Encoder, SentenceEncoder
+from app.catalog.search.features import STOP, Language, RecipeFilter
+from app.catalog.search.index import prepare_index
+from app.catalog.store import Catalog
 from app.config import Config
 from app.models import Recipe, RecipeSearchLimits, Result
-from app.retrieval.encoder import Encoder, SentenceEncoder
-from app.retrieval.features import STOP, Language, RecipeFilter
-from app.retrieval.index import prepare_index
 
 
 @dataclass

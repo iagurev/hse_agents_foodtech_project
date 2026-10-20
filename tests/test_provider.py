@@ -4,10 +4,11 @@ import httpx
 import pytest
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
-from app.assistant.agent import build_agent, build_model
+from app.assistant.agent import build_agent
 from app.assistant.session import Session
 from app.config import Config
-from app.llm import ModelGateway
+from app.llm.gateway import ModelGateway
+from app.llm.provider import build_model
 
 
 @pytest.mark.parametrize("request_limit", [2, 3])
@@ -149,7 +150,7 @@ async def test_invalid_native_output_is_charged_without_automatic_retry() -> Non
                 "id": "invalid",
                 "object": "chat.completion",
                 "created": 1,
-                "model": "z-ai/glm-5.3-flash",
+                "model": "openai/gpt-6-luna",
                 "provider": "OpenInference",
                 "choices": [
                     {
@@ -276,3 +277,41 @@ async def test_stream_preserves_separate_encrypted_reasoning_items_for_continuat
         first = await agent.run("Первый", event_stream_handler=consume)
         await agent.run("Продолжи", message_history=first.new_messages(), event_stream_handler=consume)
     assert len(requests) == 2
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter", "error"])
+async def test_truncated_summary_is_charged_but_rejected(finish_reason):
+    from pydantic_ai.exceptions import UnexpectedModelBehavior
+    from pydantic_ai.usage import RunUsage
+
+    from app.llm.gateway import ModelGateway
+
+    def response(req):
+        body = json.loads(req.content)
+        assert body["max_completion_tokens"] == 16000 and "max_tokens" not in body and not body.get("tools")
+        return httpx.Response(
+            200,
+            json={
+                "id": "m",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "openai/gpt-6-luna",
+                "provider": "OpenAI",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": finish_reason,
+                        "native_finish_reason": finish_reason,
+                        "message": {"role": "assistant", "content": "Оборвано"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "cost": 0.001},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+        usage = RunUsage()
+        gateway = ModelGateway(build_model(Config(_env_file=None, openrouter_api_key="test"), client), 12)
+        with pytest.raises(UnexpectedModelBehavior):
+            await gateway.compact({"history": []}, usage)
+        assert usage.requests == 1 and usage.details["cost_nano_usd"] == 1000000

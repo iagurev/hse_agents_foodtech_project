@@ -10,13 +10,15 @@ React/Vite и FastAPI работают как небольшое мобильн�
 |---|---|
 | Настройки и запуск | `config.py`, `web/server.py`, `assistant/__main__.py` |
 | Агент, контекст и контракты tools | `assistant/agent.py`, `context.py`, `tools.py` |
-| Исполнение хода, история и сжатие | `assistant/session.py`, `compaction.py`, `tokens.py` |
-| Меню и его проверки | `planning.py` |
+| Исполнение хода, история и сжатие | `assistant/session.py`, `compaction.py` |
+| Меню, проверки и ориентир энергии | `planning/service.py`, `calculations.py`, `energy.py` |
 | Покупки и чистые расчёты | `shopping/service.py`, `calculations.py` |
-| Каталог и гибридный поиск | `catalog.py`, `retrieval/` |
-| Предметные типы, модельные вызовы, хранение | `models.py`, `llm.py`, `storage.py` |
-| HTTP, авторизация, SSE и ручные правки | `web/server.py`, `contracts.py`, `storage.py`, `runs.py`, `objects.py`, `presentation.py` |
-| Внешние подключения и наблюдаемость | `integrations.py`, `network.py`, `tracing.py`, `progress.py` |
+| Каталог, его проверка и гибридный поиск | `catalog/store.py`, `check.py`, `search/` |
+| OpenRouter, модельные вызовы и токены | `llm/provider.py`, `gateway.py`, `tokens.py` |
+| Предметные типы и хранение состояния | `models.py`, `storage.py` |
+| HTTP и жизненный цикл | `web/server.py` — оболочка, `lifespan.py` — зависимости, `routes.py` — маршруты |
+| HTTP-типы, авторизация, SSE и ручные правки | `web/contracts.py`, `storage.py`, `runs.py`, `objects.py`, `presentation.py` |
+| Внешние подключения и наблюдаемость | `integrations/vkusvill.py`, `tls.py`, `tracing.py`, `progress.py` |
 
 В `frontend/src/`: `main.tsx` — сессия и hash-навигация; `screens/` — экраны; `components/` — общие элементы, карточки и статусы; `styles/` — стили; `api.ts` — HTTP и типы; `preview.ts` — предварительные расчёты. Экран владеет своим состоянием, отдельного глобального хранилища нет.
 
@@ -51,7 +53,7 @@ React/Vite и FastAPI работают как небольшое мобильн�
 | Свежие завершённые ходы | 6 → 3 → 1 → 0 |
 | Бюджет задачи / сжатия | 600 с и 12 запросов / отдельно 180 с и 2 запроса |
 
-Размер проверяется перед каждым запросом чатового агента, в том числе после tools. Текущий ход не обрезается; сводка атомарно заменяет предыдущую только после успешного сжатия. Полный журнал остаётся в БД. Для Luna используется оценка `tiktoken/o200k_base` по SDK-сериализации с запасом; GLM имеет отдельный счётчик. Локальная оценка не гарантирует точного совпадения с usage провайдера.
+Размер проверяется перед каждым запросом чатового агента, в том числе после tools. Текущий ход не обрезается; сводка атомарно заменяет предыдущую только после успешного сжатия. Полный журнал остаётся в БД. Счётчик Luna использует `tiktoken/o200k_base` и сериализацию SDK, включая tools и reasoning текущего цикла. Загрузка выполняется один раз, подсчёт — вне event loop. Локальная оценка с запасом не гарантирует точного совпадения с usage провайдера.
 
 ## HTTP и версии
 

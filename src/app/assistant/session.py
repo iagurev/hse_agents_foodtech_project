@@ -25,14 +25,14 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 
 from app.assistant.compaction import Compaction, CompactionError, dialogue_text
 from app.assistant.context import Context
-from app.assistant.tokens import RequestCounter
-from app.catalog import Catalog
+from app.catalog.search.service import RecipeRetriever
+from app.catalog.store import Catalog
 from app.config import Config
-from app.integrations import Products
-from app.llm import Generator
-from app.planning import Planner
+from app.integrations.vkusvill import Products
+from app.llm.gateway import Generator
+from app.llm.tokens import RequestCounter
+from app.planning.service import Planner
 from app.progress import EventSink
-from app.retrieval.service import RecipeRetriever
 from app.shopping.service import Shopper
 from app.storage import Store
 

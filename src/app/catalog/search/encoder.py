@@ -7,7 +7,7 @@ import numpy as np
 from fastembed import TextEmbedding
 from huggingface_hub import set_client_factory, snapshot_download
 
-from app.network import system_tls_context
+from app.integrations.tls import system_tls_context
 
 MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 REPOSITORY = "qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q"

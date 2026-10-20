@@ -3,18 +3,18 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.assistant.prompts import load_prompt
-from app.catalog import Catalog
-from app.energy import energy_reference
-from app.integrations import Products
+from app.catalog.store import Catalog
+from app.integrations.vkusvill import Products
 from app.models import PersonContext
-from app.planning import Planner
+from app.planning.energy import energy_reference
+from app.planning.service import Planner
 from app.progress import EventSink, Progress
 from app.shopping.service import Shopper
 from app.storage import Store
 
 if TYPE_CHECKING:
     from app.assistant.compaction import Compaction
-    from app.retrieval.service import RecipeRetriever
+    from app.catalog.search.service import RecipeRetriever
 
 
 @dataclass

@@ -16,7 +16,6 @@ services:
       SOURCES_DATABASE_PATH: /app/data/sources.sqlite
       RETRIEVAL_CACHE_PATH: /runtime/retrieval
       RETRIEVAL_MODEL_CACHE_PATH: /runtime/retrieval-model
-      TOKENIZER_CACHE_PATH: /runtime/tokenizer
       FRONTEND_PATH: /app/frontend/dist
       LANGFUSE_BASE_URL: ${LANGFUSE_DOCKER_URL:-http://host.docker.internal:3001}
     extra_hosts:

@@ -19,9 +19,9 @@ from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
 
 from app.assistant.prompts import load_prompt
-from app.assistant.tokens import RequestCounter
 from app.config import Config
-from app.llm import Generator
+from app.llm.gateway import Generator
+from app.llm.tokens import RequestCounter
 from app.storage import Store
 
 if TYPE_CHECKING:

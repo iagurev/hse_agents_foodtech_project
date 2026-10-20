@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from pydantic_ai.usage import RunUsage
 
 from app.models import Cost, Ingredient, Meal, Nutrition, PersonContext, PlanDraft, PlanLimits, Recipe
-from app.planning import Planner
+from app.planning.service import Planner
 
 
 def test_round_recipe_numbers_without_rounding_ingredients_or_source_products(recipe, product):

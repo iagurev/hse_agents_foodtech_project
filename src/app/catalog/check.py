@@ -7,7 +7,7 @@ from collections import Counter
 
 from pydantic import ValidationError
 
-from app.catalog import Catalog
+from app.catalog.store import Catalog
 from app.config import get_config
 from app.models import Recipe
 

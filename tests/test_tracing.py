@@ -13,7 +13,7 @@ from pydantic_ai.usage import RequestUsage, RunUsage
 from app.assistant.agent import build_agent
 from app.assistant.session import Session
 from app.config import Config
-from app.llm import ModelGateway
+from app.llm.gateway import ModelGateway
 from app.tracing import Tracing, outcome, stage
 from app.web.guard import InputGuard
 

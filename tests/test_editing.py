@@ -6,7 +6,7 @@ from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import RunUsage
 
 from app.assistant.tools import ProductQuery, SkuId, build_toolset, get_product_analogs, search_products
-from app.integrations import IntegrationError
+from app.integrations.vkusvill import IntegrationError
 from app.models import (
     CartLimits,
     CartProduct,
@@ -18,7 +18,7 @@ from app.models import (
     Result,
     UnresolvedProduct,
 )
-from app.planning import Planner
+from app.planning.service import Planner
 from app.shopping.calculations import assemble
 from app.shopping.service import Shopper
 

@@ -16,7 +16,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.usage import RunUsage
 
 from app.assistant.session import Session
-from app.catalog import Catalog
+from app.catalog.store import Catalog
 from app.config import Config
 from app.tracing import Tracing, outcome
 from app.web.contracts import ObjectReference

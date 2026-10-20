@@ -15,9 +15,9 @@ from pydantic_ai.messages import (
 )
 
 from app.config import Config
-from app.integrations import IntegrationError
+from app.integrations.vkusvill import IntegrationError
 from app.models import CartLimits, PlanDraft, PlanLimits, Result, SkuAmount, SkusSource
-from app.planning import evaluate
+from app.planning.calculations import evaluate
 from app.shopping.service import Shopper
 from app.web.contracts import Profile
 from app.web.guard import GuardDecision

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, JsonValue
 from pydantic_ai.messages import ModelMessagesTypeAdapter, TextPart, ToolReturnPart, UserPromptPart
 
-from app.catalog import Catalog
+from app.catalog.store import Catalog
 from app.models import Result
 from app.web.storage import WebStore
 

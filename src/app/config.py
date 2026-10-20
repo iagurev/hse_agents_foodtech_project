@@ -39,7 +39,6 @@ class Config(BaseSettings):
     summary_max_tokens: int = Field(default=8000, gt=0)
     compaction_timeout_seconds: float = Field(default=180, gt=0)
     compaction_request_limit: int = Field(default=2, ge=1, le=2)
-    tokenizer_cache_path: Path = Path("../hse_agents_runtime/tokenizer")
     guard_model: str = "google/gemini-2.5-flash-lite"
     guard_timeout_seconds: float = Field(default=60, gt=0)
     integration_timeout_seconds: float = Field(default=60, gt=0)

@@ -11,9 +11,9 @@ from pathlib import Path
 import aiosqlite
 from loguru import logger
 
-from app.integrations import IntegrationError, parse_product
+from app.catalog.search.features import RecipeFilter
+from app.integrations.vkusvill import IntegrationError, parse_product
 from app.models import NormalizedProduct, Product, Recipe, RecipeSearchLimits, Result
-from app.retrieval.features import RecipeFilter
 
 
 class Catalog:

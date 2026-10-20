@@ -8,15 +8,16 @@ from uuid import uuid4
 import httpx
 from loguru import logger
 
-from app.assistant.agent import build_agent, build_model
+from app.assistant.agent import build_agent
 from app.assistant.session import Session
-from app.assistant.tokens import load_counter
-from app.catalog import Catalog
+from app.catalog.search.service import create_retriever
+from app.catalog.store import Catalog
 from app.config import get_config
-from app.integrations import Vkusvill
-from app.llm import ModelGateway
-from app.network import system_tls_context
-from app.retrieval.service import create_retriever
+from app.integrations.tls import system_tls_context
+from app.integrations.vkusvill import Vkusvill
+from app.llm.gateway import ModelGateway
+from app.llm.provider import build_model
+from app.llm.tokens import load_counter
 from app.storage import Store
 from app.tracing import Tracing, outcome
 
@@ -49,7 +50,7 @@ async def execute(args: argparse.Namespace) -> None:
         tracing = Tracing(config)
         model = build_model(config, client)
         retriever = await create_retriever(catalog, config)
-        counter = await load_counter(model, config.tokenizer_cache_path, client)
+        counter = await load_counter(model)
         session = Session(
             config,
             build_agent(model, tracing.instrumentation),

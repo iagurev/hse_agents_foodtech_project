@@ -2,7 +2,7 @@ import pytest
 from pydantic_ai.usage import RunUsage
 
 from app.assistant.tools import ProductQuery, SkuId
-from app.integrations import parse_product
+from app.integrations.vkusvill import parse_product
 from app.models import (
     CartLimits,
     CartProduct,
@@ -236,7 +236,7 @@ async def test_public_product_searches_have_fixed_top_ten(store, catalog):
 async def test_progress_counts_unique_searches_empty_and_error(store, catalog_writer, recipe, product):
     import asyncio
 
-    from app.integrations import IntegrationError
+    from app.integrations.vkusvill import IntegrationError
     from app.models import Ingredient
     from app.progress import Progress
 

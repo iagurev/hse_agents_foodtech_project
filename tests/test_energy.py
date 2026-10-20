@@ -1,4 +1,4 @@
-from app.energy import energy_reference
+from app.planning.energy import energy_reference
 
 PROFILE = dict(sex="female", age=25, height_cm=170, weight_kg=60, activity="inactive")
 
@@ -36,7 +36,7 @@ async def test_same_reference_reaches_chat_and_generator_without_new_validation(
 
     from app.assistant.context import Context
     from app.models import PersonContext, PlanDraft, PlanLimits
-    from app.planning import Planner
+    from app.planning.service import Planner
 
     class Generator:
         def __init__(self):

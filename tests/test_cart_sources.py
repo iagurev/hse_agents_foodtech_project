@@ -11,7 +11,7 @@ from test_shopping import Products, Selector
 
 from app.assistant.context import Context
 from app.assistant.tools import CartResult, CreateCartInput, build_toolset
-from app.integrations import IntegrationError
+from app.integrations.vkusvill import IntegrationError
 from app.models import (
     CartLimits,
     CartProduct,

@@ -9,7 +9,7 @@ from pydantic_ai import RunContext, Tool
 from pydantic_ai.toolsets import FunctionToolset
 
 from app.assistant.context import Context
-from app.integrations import IntegrationError
+from app.integrations.vkusvill import IntegrationError
 from app.models import (
     CartLimits,
     CartProduct,

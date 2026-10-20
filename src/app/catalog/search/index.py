@@ -8,9 +8,9 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
+from app.catalog.search.encoder import Encoder
+from app.catalog.search.features import Language, equipment_features
 from app.models import NormalizedProduct, Recipe
-from app.retrieval.encoder import Encoder
-from app.retrieval.features import Language, equipment_features
 
 VERSION = "recipe-retrieval-v1"
 
